@@ -94,12 +94,21 @@ class LangfuseSettings(EnvBase):
     LANGFUSE_LOGGING: bool
 
 
+class MLflowsSettings(EnvBase):
+    """MLflows integration settings."""
+
+    MLFLOW_LOGGING: bool
+    MLFLOW_TRACKING_URI: str
+    MLFLOW_EXPERIMENT: str
+
+
 class Settings:
     def __init__(self):
         self.app = AppSettings()
         self.db = DatabaseSettings()
         self.pool = PoolSettings()
         self.langfuse = LangfuseSettings()
+        self.mlflow = MLflowsSettings()
 
 
 settings = Settings()
