@@ -30,10 +30,10 @@ dependencies = [
     "asyncpg>=0.30.0",
     "fastapi>=0.116.1",
     "greenlet>=3.2.3",
-    "langchain-openai>=1.0.3",
-    "langgraph>=1.0.3",
-    "langchain>=1.0.8",
-    "langgraph-checkpoint-postgres>=2.0.23",
+    "langchain-openai>=1.1.7",
+    "langgraph>=1.0.6",
+    "langchain>=1.2.6",
+    "langgraph-checkpoint-postgres>=3.0.3",
     "psycopg[binary]>=3.2.9",
     "pydantic>=2.11.7",
     "pyjwt>=2.10.1",
@@ -149,7 +149,7 @@ directory = "htmlcov"
 [dependency-groups]
 dev = [
     "ruff>=0.8.4",
-    "langgraph-sdk==0.2.4",
+    "langgraph-sdk>=0.2.4",
     "mypy>=1.17.1",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
