@@ -14,7 +14,11 @@ from langgraph.runtime import Runtime
 from react_agent.context import Context
 from react_agent.state import InputState, State
 from react_agent.tools import TOOLS
-from react_agent.utils import load_chat_model
+from react_agent.utils import (
+    build_token_limited_messages,
+    is_media_not_supported_error,
+    load_chat_model,
+)
 
 # Define the function that calls the model
 
@@ -42,12 +46,25 @@ async def call_model(
     )
 
     # Get the model's response
-    response = cast(
-        "AIMessage",
-        await model.ainvoke(
-            [{"role": "system", "content": system_message}, *state.messages]
-        ),
+    model_messages = build_token_limited_messages(
+        model,
+        system_message,
+        state.messages,
+        num_limit_token=runtime.context.num_limit_token,
+        num_limit_response_reserve=runtime.context.num_limit_response_reserve,
+        num_limit_safety_buffer=runtime.context.num_limit_safety_buffer,
+        num_limit_min_recent_messages=runtime.context.num_limit_min_recent_messages,
     )
+
+    try:
+        response = cast("AIMessage", await model.ainvoke(model_messages))
+    except Exception as error:
+        if is_media_not_supported_error(error):
+            response = AIMessage(
+                content="Sorry, the model do not have image capability."
+            )
+        else:
+            raise
 
     # Handle the case when it's the last step and the model still wants to use a tool
     if state.is_last_step and response.tool_calls:

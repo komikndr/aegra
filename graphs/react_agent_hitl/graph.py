@@ -4,6 +4,7 @@ Works with a chat model with tool calling support.
 """
 
 import json
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Literal, cast
 
@@ -16,7 +17,11 @@ from langgraph.types import Command, interrupt
 from react_agent_hitl.context import Context
 from react_agent_hitl.state import InputState, State
 from react_agent_hitl.tools import TOOLS
-from react_agent_hitl.utils import load_chat_model
+from react_agent_hitl.utils import (
+    build_token_limited_messages,
+    is_media_not_supported_error,
+    load_chat_model,
+)
 
 # Define the function that calls the model
 
@@ -44,12 +49,25 @@ async def call_model(
     )
 
     # Get the model's response
-    response = cast(
-        "AIMessage",
-        await model.ainvoke(
-            [{"role": "system", "content": system_message}, *state.messages]
-        ),
+    model_messages = build_token_limited_messages(
+        model,
+        system_message,
+        state.messages,
+        num_limit_token=runtime.context.num_limit_token,
+        num_limit_response_reserve=runtime.context.num_limit_response_reserve,
+        num_limit_safety_buffer=runtime.context.num_limit_safety_buffer,
+        num_limit_min_recent_messages=runtime.context.num_limit_min_recent_messages,
     )
+
+    try:
+        response = cast("AIMessage", await model.ainvoke(model_messages))
+    except Exception as error:
+        if is_media_not_supported_error(error):
+            response = AIMessage(
+                content="Sorry, the model do not have image capability."
+            )
+        else:
+            raise
 
     # Handle the case when it's the last step and the model still wants to use a tool
     if state.is_last_step and response.tool_calls:
@@ -66,7 +84,7 @@ async def call_model(
     return {"messages": [response]}
 
 
-def _find_tool_message(messages: list) -> AIMessage | None:
+def _find_tool_message(messages: Sequence[object]) -> AIMessage | None:
     """Find the last AI message with tool calls."""
     for msg in reversed(messages):
         if isinstance(msg, AIMessage) and hasattr(msg, "tool_calls") and msg.tool_calls:

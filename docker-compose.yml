@@ -5,7 +5,7 @@ services:
     env_file:
       - .env
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql
     healthcheck:
@@ -25,18 +25,22 @@ services:
       - .env
     environment:
       - POSTGRES_HOST=postgres
+      - KEYCLOAK_JWKS_URL=${KEYCLOAK_JWKS_URL:-http://keycloak:8080/realms/${KEYCLOAK_REALM:-master}/protocol/openid-connect/certs}
     depends_on:
       postgres:
         condition: service_healthy
+      keycloak:
+        condition: service_started
     volumes:
       - ./aegra.json:/app/aegra.json:ro
       - ./graphs:/app/graphs:ro
       - ./src:/app/src:ro # for hot reload support of server
       - ./jwt_mock_auth_example.py:/app/jwt_mock_auth_example.py:ro
+      - ./keycloak_auth.py:/app/keycloak_auth.py:ro
+      - ./custom_routes_example.py:/app/custom_routes_example.py:ro
+      - ./analytic_test.db:/app/analytic_test.db
       - ./.env:/app/.env:ro
       - ./alembic:/app/alembic:ro # for migrations
-      # Mount custom route files dynamically (add your custom routes file here)
-      - ./custom_routes_example.py:/app/custom_routes_example.py:ro
     command: >
       sh -c "
         echo 'Running database migrations...' &&
@@ -44,6 +48,26 @@ services:
         echo 'Starting Aegra server...' &&
         uvicorn src.agent_server.main:app --host 0.0.0.0 --port $${PORT:-8000} --reload
       "
+
+  # Keycloak (production mode)
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    environment:
+      - KC_BOOTSTRAP_ADMIN_USERNAME=${KEYCLOAK_ADMIN_USER:-admin}
+      - KC_BOOTSTRAP_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-change-me}
+      - KC_HEALTH_ENABLED=true
+      - KC_METRICS_ENABLED=true
+      - KC_HTTP_ENABLED=true
+      - KC_PROXY_HEADERS=xforwarded
+      - KC_HOSTNAME=${KEYCLOAK_HOSTNAME:-localhost}
+      - KC_HOSTNAME_STRICT=${KEYCLOAK_HOSTNAME_STRICT:-false}
+    command: start --http-port=8080 --import-realm
+    ports:
+      - "8080:8080"
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ./keycloak-realm-aegra.json:/opt/keycloak/data/import/keycloak-realm-aegra.json:ro
+    # restart: unless-stopped
 
   # Redis (optional - for advanced queuing in future phases)
   redis:
@@ -58,3 +82,4 @@ services:
 volumes:
   postgres_data:
   redis_data:
+  keycloak_data:

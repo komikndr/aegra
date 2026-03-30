@@ -172,6 +172,38 @@ class RunEvent(Base):
     )
 
 
+class ExecutiveArtifact(Base):
+    __tablename__ = "executive_artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(Text)
+    artifact_kind: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'executive_report'")
+    )
+    source_message_id: Mapped[str | None] = mapped_column(Text)
+    metadata_dict: Mapped[dict] = mapped_column(
+        JSONB, server_default=text("'{}'::jsonb"), name="metadata"
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=text("now()")
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=text("now()")
+    )
+
+    __table_args__ = (
+        Index("idx_executive_artifacts_thread_id", "thread_id"),
+        Index("idx_executive_artifacts_user_id", "user_id"),
+        Index("idx_executive_artifacts_created_at", "created_at"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Session factory
 # ---------------------------------------------------------------------------

@@ -75,6 +75,7 @@ COPY alembic.ini ./alembic.ini
 COPY alembic/ ./alembic/
 COPY aegra.json ./aegra.json
 COPY graphs/ ./graphs/
+COPY custom_routes_example.py ./custom_routes_example.py
 
 # Copy src to keep compatibility with current compose command using 'src.agent_server.main:app'
 # (We can switch compose to 'agent_server.main:app' later and drop this for a smaller image.)

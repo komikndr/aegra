@@ -9,7 +9,11 @@ from langgraph.runtime import Runtime
 from react_agent import graph as react_graph
 from react_agent.context import Context
 from react_agent.state import InputState, State
-from react_agent.utils import load_chat_model
+from react_agent.utils import (
+    build_token_limited_messages,
+    is_media_not_supported_error,
+    load_chat_model,
+)
 
 builder = StateGraph(State, input_schema=InputState, context_schema=Context)
 
@@ -39,12 +43,25 @@ async def no_stream(
     )
 
     # Get the model's response
-    response = cast(
-        "AIMessage",
-        await model.ainvoke(
-            [{"role": "system", "content": system_message}, *state.messages]
-        ),
+    model_messages = build_token_limited_messages(
+        model,
+        system_message,
+        state.messages,
+        num_limit_token=runtime.context.num_limit_token,
+        num_limit_response_reserve=runtime.context.num_limit_response_reserve,
+        num_limit_safety_buffer=runtime.context.num_limit_safety_buffer,
+        num_limit_min_recent_messages=runtime.context.num_limit_min_recent_messages,
     )
+
+    try:
+        response = cast("AIMessage", await model.ainvoke(model_messages))
+    except Exception as error:
+        if is_media_not_supported_error(error):
+            response = AIMessage(
+                content="Sorry, the model do not have image capability."
+            )
+        else:
+            raise
     # Return the model's response as a list to be added to existing messages
     return {"messages": [response]}
 
