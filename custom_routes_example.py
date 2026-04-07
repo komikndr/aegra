@@ -192,15 +192,11 @@ async def whoami(user: User = Depends(require_auth)):
 
 
 @app.get("/custom/public")
-async def public_endpoint():
-    """Public endpoint - no auth dependency explicitly added.
-
-    This endpoint will be protected if enable_custom_route_auth is True,
-    otherwise it will be public. Useful for testing the enable_custom_route_auth config.
-    """
+async def public_endpoint(user: User = Depends(require_auth)):
+    """Example endpoint protected by the active auth configuration."""
     return {
-        "message": "This is public by default",
-        "note": "Protected if enable_custom_route_auth is enabled",
+        "message": "This endpoint requires authentication",
+        "user": user.identity,
     }
 
 

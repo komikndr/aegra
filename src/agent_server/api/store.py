@@ -198,7 +198,9 @@ async def search_store_items(
     )
 
 
-def apply_user_namespace_scoping(user_id: str, namespace: list[str]) -> list[str]:
+def apply_user_namespace_scoping(
+    user_id: str, namespace: list[str] | None
+) -> list[str]:
     """Apply user-based namespace scoping for data isolation"""
 
     if not namespace:
@@ -209,5 +211,4 @@ def apply_user_namespace_scoping(user_id: str, namespace: list[str]) -> list[str
     if namespace[0] == "users" and len(namespace) >= 2 and namespace[1] == user_id:
         return namespace
 
-    # For development, allow all namespaces (remove this for production)
-    return namespace
+    raise HTTPException(403, "Namespace access denied")

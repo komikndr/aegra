@@ -75,7 +75,9 @@ def map_command_to_langgraph(cmd: dict[str, Any]) -> Command:
     )
 
 
-async def set_thread_status(session: AsyncSession, thread_id: str, status: str) -> None:
+async def set_thread_status(
+    session: AsyncSession, thread_id: str, user_id: str, status: str
+) -> None:
     """Update the status column of a thread.
 
     Status is validated to ensure it conforms to API specification.
@@ -86,7 +88,7 @@ async def set_thread_status(session: AsyncSession, thread_id: str, status: str) 
     validated_status = validate_thread_status(status)
     result = await session.execute(
         update(ThreadORM)
-        .where(ThreadORM.thread_id == thread_id)
+        .where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user_id)
         .values(status=validated_status, updated_at=datetime.now(UTC))
     )
     await session.commit()
@@ -101,7 +103,7 @@ async def update_thread_metadata(
     thread_id: str,
     assistant_id: str,
     graph_id: str,
-    user_id: str | None = None,
+    user_id: str,
 ) -> None:
     """Update thread metadata with assistant and graph information (dialect agnostic).
 
@@ -113,10 +115,6 @@ async def update_thread_metadata(
     )
 
     if not thread:
-        # Auto-create thread if it doesn't exist
-        if not user_id:
-            raise HTTPException(400, "Cannot auto-create thread: user_id is required")
-
         metadata = {
             "owner": user_id,
             "assistant_id": str(assistant_id),
@@ -134,6 +132,9 @@ async def update_thread_metadata(
         await session.commit()
         return
 
+    if thread.user_id != user_id:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+
     md = dict(getattr(thread, "metadata_json", {}) or {})
     md.update(
         {
@@ -143,19 +144,21 @@ async def update_thread_metadata(
     )
     await session.execute(
         update(ThreadORM)
-        .where(ThreadORM.thread_id == thread_id)
+        .where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user_id)
         .values(metadata_json=md, updated_at=datetime.now(UTC))
     )
     await session.commit()
 
 
 async def _validate_resume_command(
-    session: AsyncSession, thread_id: str, command: dict[str, Any] | None
+    session: AsyncSession, thread_id: str, user_id: str, command: dict[str, Any] | None
 ) -> None:
     """Validate resume command requirements."""
     if command and command.get("resume") is not None:
         # Check if thread exists and is in interrupted state
-        thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id)
+        thread_stmt = select(ThreadORM).where(
+            ThreadORM.thread_id == thread_id, ThreadORM.user_id == user_id
+        )
         thread = await session.scalar(thread_stmt)
         if not thread:
             raise HTTPException(404, f"Thread '{thread_id}' not found")
@@ -190,7 +193,7 @@ async def create_run(
         request.context = {**(request.context or {}), **value["context"]}
 
     # Validate resume command requirements early
-    await _validate_resume_command(session, thread_id, request.command)
+    await _validate_resume_command(session, thread_id, user.identity, request.command)
 
     run_id = str(uuid4())
 
@@ -245,7 +248,7 @@ async def create_run(
     await update_thread_metadata(
         session, thread_id, assistant.assistant_id, assistant.graph_id, user.identity
     )
-    await set_thread_status(session, thread_id, "busy")
+    await set_thread_status(session, thread_id, user.identity, "busy")
 
     # Persist run record via ORM model in core.orm (Run table)
     now = datetime.now(UTC)
@@ -308,7 +311,7 @@ async def create_and_stream_run(
     """Create a new run and stream its execution - persisted + SSE."""
 
     # Validate resume command requirements early
-    await _validate_resume_command(session, thread_id, request.command)
+    await _validate_resume_command(session, thread_id, user.identity, request.command)
 
     run_id = str(uuid4())
 
@@ -363,7 +366,7 @@ async def create_and_stream_run(
     await update_thread_metadata(
         session, thread_id, assistant.assistant_id, assistant.graph_id, user.identity
     )
-    await set_thread_status(session, thread_id, "busy")
+    await set_thread_status(session, thread_id, user.identity, "busy")
 
     # Persist run record
     now = datetime.now(UTC)
@@ -617,7 +620,7 @@ async def wait_for_run(
     Compatible with LangGraph SDK's runs.wait() method and Agent Protocol spec.
     """
     # Validate resume command requirements early
-    await _validate_resume_command(session, thread_id, request.command)
+    await _validate_resume_command(session, thread_id, user.identity, request.command)
 
     run_id = str(uuid4())
 
@@ -670,7 +673,7 @@ async def wait_for_run(
     await update_thread_metadata(
         session, thread_id, assistant.assistant_id, assistant.graph_id, user.identity
     )
-    await set_thread_status(session, thread_id, "busy")
+    await set_thread_status(session, thread_id, user.identity, "busy")
 
     # Persist run record
     now = datetime.now(UTC)
@@ -1052,7 +1055,7 @@ async def execute_run_async(
                 raise RuntimeError(
                     f"No database session available to update thread {thread_id} status"
                 )
-            await set_thread_status(session, thread_id, "interrupted")
+            await set_thread_status(session, thread_id, user.identity, "interrupted")
 
         else:
             # Update with results - use standard status
@@ -1064,7 +1067,7 @@ async def execute_run_async(
                 raise RuntimeError(
                     f"No database session available to update thread {thread_id} status"
                 )
-            await set_thread_status(session, thread_id, "idle")
+            await set_thread_status(session, thread_id, user.identity, "idle")
 
     except asyncio.CancelledError:
         # Store empty output to avoid JSON serialization issues - use standard status
@@ -1073,7 +1076,7 @@ async def execute_run_async(
             raise RuntimeError(
                 f"No database session available to update thread {thread_id} status"
             ) from None
-        await set_thread_status(session, thread_id, "idle")
+        await set_thread_status(session, thread_id, user.identity, "idle")
         # Signal cancellation to broker
         await streaming_service.signal_run_cancelled(run_id)
         raise
@@ -1087,7 +1090,7 @@ async def execute_run_async(
                 f"No database session available to update thread {thread_id} status"
             ) from None
         # Set thread status to "error" when run fails (matches API specification)
-        await set_thread_status(session, thread_id, "error")
+        await set_thread_status(session, thread_id, user.identity, "error")
         # Note: Error event already sent to broker in inner exception handler
         # Only signal if broker still exists (cleanup not yet called)
         broker = broker_manager.get_broker(run_id)

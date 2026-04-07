@@ -56,6 +56,10 @@ logger = structlog.getLogger(__name__)
 
 # Default CORS headers required for LangGraph SDK stream reconnection
 DEFAULT_EXPOSE_HEADERS = ["Content-Location", "Location"]
+DEFAULT_LOCAL_CORS_ORIGINS = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
 
 
 @asynccontextmanager
@@ -186,7 +190,7 @@ def _add_cors_middleware(app: FastAPI, cors_config: dict[str, Any] | None) -> No
     else:
         app.add_middleware(
             CORSMiddleware,
-            allow_origins=["*"],
+            allow_origins=DEFAULT_LOCAL_CORS_ORIGINS,
             allow_credentials=True,
             allow_methods=["*"],
             allow_headers=["*"],
@@ -280,8 +284,8 @@ def create_app() -> FastAPI:
         application = merge_exception_handlers(application, exception_handlers)
         _add_common_middleware(application, cors_config)
 
-        # Apply auth to custom routes if enabled
-        if http_config and http_config.get("enable_custom_route_auth", False):
+        # Apply auth to custom routes unless explicitly disabled
+        if http_config is None or http_config.get("enable_custom_route_auth", True):
             _apply_auth_to_routes(application, auth_dependency)
     else:
         application = FastAPI(

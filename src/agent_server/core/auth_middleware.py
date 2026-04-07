@@ -73,7 +73,8 @@ class LangGraphAuthBackend(AuthenticationBackend):
     Starlette's AuthenticationMiddleware.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, allow_noop_auth: bool = False) -> None:
+        self.allow_noop_auth = allow_noop_auth
         self.auth_instance = self._load_auth_instance()
 
     def _load_auth_instance(self) -> Auth | None:
@@ -226,14 +227,11 @@ class LangGraphAuthBackend(AuthenticationBackend):
         Raises:
             AuthenticationError: If authentication fails
         """
-        # Handle noop auth when no auth instance is configured
-        # Default to noop (anonymous) authentication when no auth file is found,
-        # regardless of AUTH_TYPE setting. This ensures the server works out-of-the-box.
         if self.auth_instance is None:
-            logger.debug(
-                "No auth file configured, defaulting to noop (anonymous) authentication"
-            )
-            # Return anonymous user when no auth is configured
+            if not self.allow_noop_auth:
+                raise AuthenticationError("Authentication is not configured")
+
+            logger.debug("No auth file configured, using explicit noop authentication")
             user_data: Auth.types.MinimalUserDict = {
                 "identity": "anonymous",
                 "display_name": "Anonymous User",
@@ -299,12 +297,16 @@ def get_auth_backend() -> AuthenticationBackend:
     """
     auth_type = settings.app.AUTH_TYPE
 
-    if auth_type in ["noop", "custom"]:
-        logger.debug(f"Using auth backend with type: {auth_type}")
+    if auth_type == "noop":
+        logger.warning("Using noop authentication backend")
+        return LangGraphAuthBackend(allow_noop_auth=True)
+
+    if auth_type == "custom":
+        logger.debug("Using auth backend with type: custom")
         return LangGraphAuthBackend()
-    else:
-        logger.warning(f"Unknown AUTH_TYPE: {auth_type}, using noop")
-        return LangGraphAuthBackend()
+
+    logger.error(f"Unknown AUTH_TYPE: {auth_type}")
+    return LangGraphAuthBackend()
 
 
 def on_auth_error(conn: HTTPConnection, exc: AuthenticationError) -> JSONResponse:

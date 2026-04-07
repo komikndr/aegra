@@ -69,6 +69,23 @@ services:
       - ./keycloak-realm-aegra.json:/opt/keycloak/data/import/keycloak-realm-aegra.json:ro
     # restart: unless-stopped
 
+  keycloak-init:
+    image: quay.io/keycloak/keycloak:26.0
+    depends_on:
+      keycloak:
+        condition: service_started
+    environment:
+      - KEYCLOAK_ADMIN_USER=${KEYCLOAK_ADMIN_USER:-admin}
+      - KEYCLOAK_ADMIN_PASSWORD=${KEYCLOAK_ADMIN_PASSWORD:-change-me}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-aegra}
+      - MINIO_OIDC_CLIENT_ID=${MINIO_OIDC_CLIENT_ID:-minio-console}
+      - MINIO_OIDC_CLIENT_SECRET=${MINIO_OIDC_CLIENT_SECRET:-minio-console-local-secret}
+      - MINIO_OIDC_REDIRECT_URI=${MINIO_OIDC_REDIRECT_URI:-http://localhost:9001/oauth_callback}
+    volumes:
+      - ./ops/keycloak/init-minio-client.sh:/opt/keycloak-init/init-minio-client.sh:ro
+    entrypoint: ["/bin/sh", "/opt/keycloak-init/init-minio-client.sh"]
+    restart: "no"
+
   # Redis (optional - for advanced queuing in future phases)
   redis:
     image: redis:7-alpine
