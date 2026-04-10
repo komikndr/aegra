@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
+PARENT_DIR=$(dirname "$SCRIPT_DIR")
+
 if [ "$#" -lt 2 ]; then
   echo "Usage: $0 <local|staging> <docker-compose args...>" >&2
   exit 1
@@ -16,7 +19,7 @@ case "$TARGET" in
     APP_ENV_FILE=".env"
     ;;
   staging)
-    ENV_FILE="${STAGING_ENV_FILE:-/home/kxn/onyx_ai_secret/env.staging.backend}"
+    ENV_FILE="${STAGING_ENV_FILE:-$PARENT_DIR/onyx_ai_secret/env.staging.backend}"
     COMPOSE_FILE="docker-compose-staging.yaml"
     APP_ENV_FILE="$ENV_FILE"
     ;;

@@ -53,7 +53,7 @@ services:
       - "8080:8080"
     volumes:
       - keycloak_data:/opt/keycloak/data
-      - ${KEYCLOAK_REALM_IMPORT_FILE:-/home/kxn/onyx_ai_secret/keycloak-realm-aegra.staging.json}:/opt/keycloak/data/import/keycloak-realm-aegra.json:ro
+      - ${KEYCLOAK_REALM_IMPORT_FILE:-/home/kms/onyx_ai_secret/keycloak-realm-aegra.staging.json}:/opt/keycloak/data/import/keycloak-realm-aegra.json:ro
 
   keycloak-init:
     image: quay.io/keycloak/keycloak:26.0
