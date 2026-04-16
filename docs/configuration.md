@@ -154,6 +154,8 @@ You can override configuration using environment variables:
 - **`AEGRA_CONFIG`**: Path to config file (overrides default resolution)
 - **`DATABASE_URL`**: PostgreSQL connection string
 - **`OPENAI_API_KEY`**: OpenAI API key for LLM operations
+- **`EMBEDDING_API_KEY`**: Optional dedicated API key for embedding requests
+- **`EMBEDDING_BASE_URL`**: Optional dedicated OpenAI-compatible base URL for embedding requests
 
 ## Examples
 

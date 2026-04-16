@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
@@ -37,7 +38,17 @@ def _kms_configured(context: Context) -> bool:
 
 @lru_cache(maxsize=8)
 def _get_embeddings(model_name: str) -> OpenAIEmbeddings:
-    return OpenAIEmbeddings(model=model_name)
+    init_kwargs: dict[str, str] = {"model": model_name}
+
+    base_url = os.environ.get("EMBEDDING_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    if base_url:
+        init_kwargs["base_url"] = base_url
+
+    api_key = os.environ.get("EMBEDDING_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        init_kwargs["api_key"] = api_key
+
+    return OpenAIEmbeddings(**init_kwargs)
 
 
 @lru_cache(maxsize=8)
