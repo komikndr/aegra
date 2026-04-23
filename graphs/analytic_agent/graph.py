@@ -14,7 +14,12 @@ from react_agent.utils import (
     load_chat_model,
 )
 
-from analytic_agent.context import ArtifactEditorContext, ChatContext, ExecutiveContext
+from analytic_agent.context import (
+    ArtifactEditorContext,
+    ChatContext,
+    ExecutiveContext,
+    OfficeContext,
+)
 from analytic_agent.context import Context as BaseContext
 from analytic_agent.tools import TOOLS
 
@@ -81,6 +86,7 @@ def build_graph(context_schema: type[BaseContext], name: str):
 
 chat_graph = build_graph(ChatContext, name="Analytic Chat Agent")
 executive_graph = build_graph(ExecutiveContext, name="Analytic Executive Agent")
+office_graph = build_graph(OfficeContext, name="Analytic Office Agent")
 artifact_editor_graph = build_graph(
     ArtifactEditorContext, name="Analytic Artifact Editor"
 )

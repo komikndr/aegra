@@ -76,6 +76,14 @@ class ExecutiveContext(Context):
 
 
 @dataclass(kw_only=True)
+class OfficeContext(Context):
+    system_prompt: str = field(
+        default=prompts.OFFICE_SYSTEM_PROMPT,
+        metadata={"description": "System prompt for the KMS docs builder interface."},
+    )
+
+
+@dataclass(kw_only=True)
 class ArtifactEditorContext(Context):
     system_prompt: str = field(
         default=prompts.ARTIFACT_EDITOR_SYSTEM_PROMPT,

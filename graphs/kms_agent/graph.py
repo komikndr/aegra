@@ -14,7 +14,12 @@ from react_agent.utils import (
     load_chat_model,
 )
 
-from kms_agent.context import ArtifactEditorContext, ChatContext, ExecutiveContext
+from kms_agent.context import (
+    ArtifactEditorContext,
+    ChatContext,
+    ExecutiveContext,
+    OfficeContext,
+)
 from kms_agent.context import Context as BaseContext
 from kms_agent.tools import TOOLS
 
@@ -81,4 +86,5 @@ def build_graph(context_schema: type[BaseContext], name: str):
 
 chat_graph = build_graph(ChatContext, name="KMS Chat Agent")
 executive_graph = build_graph(ExecutiveContext, name="KMS Executive Agent")
+office_graph = build_graph(OfficeContext, name="KMS Office Agent")
 artifact_editor_graph = build_graph(ArtifactEditorContext, name="KMS Artifact Editor")

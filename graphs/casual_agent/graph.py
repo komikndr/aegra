@@ -16,7 +16,12 @@ from react_agent.utils import (
     load_chat_model,
 )
 
-from casual_agent.context import ArtifactEditorContext, ChatContext, ExecutiveContext
+from casual_agent.context import (
+    ArtifactEditorContext,
+    ChatContext,
+    ExecutiveContext,
+    OfficeContext,
+)
 
 
 async def call_model(
@@ -81,6 +86,7 @@ def build_graph(context_schema: type[BaseContext], name: str):
 
 chat_graph = build_graph(ChatContext, name="Casual Chat Agent")
 executive_graph = build_graph(ExecutiveContext, name="Casual Executive Agent")
+office_graph = build_graph(OfficeContext, name="Casual Office Agent")
 artifact_editor_graph = build_graph(
     ArtifactEditorContext, name="Casual Artifact Editor"
 )
