@@ -1,6 +1,7 @@
 """A minimal graph that delegates to `react_agent.graph` as a subgraph node."""
 
-from datetime import UTC, datetime
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from typing import cast
 
 from langchain_core.messages import AIMessage
@@ -39,7 +40,7 @@ async def no_stream(
 
     # Format the system prompt
     system_message = runtime.context.system_prompt.format(
-        system_time=datetime.now(tz=UTC).isoformat()
+        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).isoformat()
     )
 
     # Get the model's response

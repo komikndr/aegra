@@ -1,7 +1,8 @@
 """Graph definitions for the casual agent."""
 
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal, cast
+from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph
@@ -29,7 +30,7 @@ async def call_model(
 ) -> dict[str, list[AIMessage]]:
     model = load_chat_model(runtime.context.model).bind_tools(TOOLS)
     system_message = runtime.context.system_prompt.format(
-        system_time=datetime.now(tz=UTC).isoformat()
+        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).isoformat()
     )
     model_messages = build_token_limited_messages(
         model,

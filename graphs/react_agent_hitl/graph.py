@@ -5,8 +5,9 @@ Works with a chat model with tool calling support.
 
 import json
 from collections.abc import Sequence
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Literal, cast
+from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import END, StateGraph
@@ -45,7 +46,7 @@ async def call_model(
 
     # Format the system prompt. Customize this to change the agent's behavior.
     system_message = runtime.context.system_prompt.format(
-        system_time=datetime.now(tz=UTC).isoformat()
+        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).isoformat()
     )
 
     # Get the model's response
