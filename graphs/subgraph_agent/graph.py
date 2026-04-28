@@ -40,7 +40,9 @@ async def no_stream(
 
     # Format the system prompt
     system_message = runtime.context.system_prompt.format(
-        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).isoformat()
+        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).strftime(
+            "%A, %d %B %Y %H:%M:%S WIB"
+        )
     )
 
     # Get the model's response

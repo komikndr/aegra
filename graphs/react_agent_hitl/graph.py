@@ -46,7 +46,9 @@ async def call_model(
 
     # Format the system prompt. Customize this to change the agent's behavior.
     system_message = runtime.context.system_prompt.format(
-        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).isoformat()
+        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).strftime(
+            "%A, %d %B %Y %H:%M:%S WIB"
+        )
     )
 
     # Get the model's response

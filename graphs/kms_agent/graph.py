@@ -30,7 +30,9 @@ async def call_model(
 ) -> dict[str, list[AIMessage]]:
     model = load_chat_model(runtime.context.model).bind_tools(TOOLS)
     system_message = runtime.context.system_prompt.format(
-        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).isoformat()
+        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).strftime(
+            "%A, %d %B %Y %H:%M:%S WIB"
+        )
     )
     model_messages = build_token_limited_messages(
         model,
