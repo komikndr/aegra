@@ -174,7 +174,7 @@ def _count_messages_tokens(model: Any, messages: list[Any]) -> int:
 
 def build_token_limited_messages(
     model: Any,
-    system_message: str,
+    system_message: str | Sequence[Any],
     messages: Sequence[BaseMessage],
     *,
     num_limit_token: int,
@@ -192,26 +192,54 @@ def build_token_limited_messages(
     min_recent = max(0, int(num_limit_min_recent_messages))
 
     input_budget = max(256, hard_limit - reserve - safety)
-    system_msg = {"role": "system", "content": system_message}
+    system_messages = _normalize_system_messages(system_message)
 
     if not messages:
-        return [system_msg]
+        return system_messages
 
     trimmed_messages = list(messages)
-    payload: list[Any] = [system_msg, *trimmed_messages]
+    payload: list[Any] = [*system_messages, *trimmed_messages]
 
     while (
         len(trimmed_messages) > min_recent
         and _count_messages_tokens(model, payload) > input_budget
     ):
         _drop_oldest_message_group(trimmed_messages)
-        payload = [system_msg, *trimmed_messages]
+        payload = [*system_messages, *trimmed_messages]
 
     while trimmed_messages and _count_messages_tokens(model, payload) > input_budget:
         _drop_oldest_message_group(trimmed_messages)
-        payload = [system_msg, *trimmed_messages]
+        payload = [*system_messages, *trimmed_messages]
 
     return payload
+
+
+def build_system_prompt_messages(
+    system_prompt: str, system_time: str, user_memory: str
+) -> list[dict[str, str]]:
+    stable_prompt = system_prompt.replace("\n\nSystem time: {system_time}", "").strip()
+    messages = [{"role": "system", "content": stable_prompt}]
+    memory = user_memory.strip()
+    if memory:
+        messages.append(
+            {
+                "role": "system",
+                "content": (
+                    "Cross-agent user memory\n"
+                    "Use this stable cross-agent memory only when it is relevant. "
+                    "Do not mention this memory block unless the user asks.\n\n"
+                    f"{memory}"
+                ),
+            }
+        )
+    messages.append({"role": "system", "content": f"System time: {system_time}"})
+    return messages
+
+
+def _normalize_system_messages(system_message: str | Sequence[Any]) -> list[Any]:
+    if isinstance(system_message, str):
+        return [{"role": "system", "content": system_message}]
+    return list(system_message)
 
 
 def _drop_oldest_message_group(messages: list[BaseMessage]) -> None:

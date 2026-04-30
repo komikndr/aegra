@@ -13,6 +13,7 @@ Architecture:
 
 from fastapi import APIRouter, Body, Depends
 
+from ..core.agent_access import assistant_is_accessible, ensure_graph_access
 from ..core.auth_deps import get_current_user
 from ..core.auth_handlers import build_auth_context, handle_event
 from ..models import (
@@ -68,6 +69,7 @@ async def list_assistants(
     else:
         assistants = await service.list_assistants(user.identity)
 
+    assistants = [assistant for assistant in assistants if assistant_is_accessible(assistant, user)]
     return AssistantList(assistants=assistants, total=len(assistants))
 
 
@@ -90,7 +92,8 @@ async def search_assistants(
         request_filters = request.filters or {}
         request.filters = {**request_filters, **filters}
 
-    return await service.search_assistants(request, user.identity)
+    assistants = await service.search_assistants(request, user.identity)
+    return [assistant for assistant in assistants if assistant_is_accessible(assistant, user)]
 
 
 @router.post("/assistants/count", response_model=int)
@@ -129,7 +132,9 @@ async def get_assistant(
     value = {"assistant_id": assistant_id}
     await handle_event(ctx, value)
 
-    return await service.get_assistant(assistant_id, user.identity)
+    assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, assistant.graph_id)
+    return assistant
 
 
 @router.patch(
@@ -155,6 +160,10 @@ async def update_assistant(
     elif value.get("metadata"):
         request.metadata = {**(request.metadata or {}), **value["metadata"]}
 
+    current_assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, current_assistant.graph_id)
+    if request.graph_id:
+        ensure_graph_access(user, request.graph_id)
     return await service.update_assistant(assistant_id, request, user.identity)
 
 
@@ -170,6 +179,8 @@ async def delete_assistant(
     value = {"assistant_id": assistant_id}
     await handle_event(ctx, value)
 
+    assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, assistant.graph_id)
     return await service.delete_assistant(assistant_id, user.identity)
 
 
@@ -187,6 +198,8 @@ async def set_assistant_latest(
     service: AssistantService = Depends(get_assistant_service),
 ):
     """Set the given version as the latest version of an assistant"""
+    assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, assistant.graph_id)
     return await service.set_assistant_latest(assistant_id, version, user.identity)
 
 
@@ -201,6 +214,8 @@ async def list_assistant_versions(
     service: AssistantService = Depends(get_assistant_service),
 ):
     """List all versions of an assistant"""
+    assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, assistant.graph_id)
     return await service.list_assistant_versions(assistant_id, user.identity)
 
 
@@ -211,6 +226,8 @@ async def get_assistant_schemas(
     service: AssistantService = Depends(get_assistant_service),
 ):
     """Get input, output, state, config and context schemas for an assistant"""
+    assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, assistant.graph_id)
     return await service.get_assistant_schemas(assistant_id, user.identity)
 
 
@@ -224,6 +241,8 @@ async def get_assistant_graph(
     """Get the graph structure for visualization"""
     # Default to False if not provided
     xray_value = xray if xray is not None else False
+    assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, assistant.graph_id)
     return await service.get_assistant_graph(assistant_id, xray_value, user.identity)
 
 
@@ -236,6 +255,8 @@ async def get_assistant_subgraphs(
     service: AssistantService = Depends(get_assistant_service),
 ):
     """Get subgraphs of an assistant"""
+    assistant = await service.get_assistant(assistant_id, user.identity)
+    ensure_graph_access(user, assistant.graph_id)
     return await service.get_assistant_subgraphs(
         assistant_id, namespace, recurse, user.identity
     )

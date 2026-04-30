@@ -1,8 +1,8 @@
 """A minimal graph that delegates to `react_agent.graph` as a subgraph node."""
 
 from datetime import datetime
-from zoneinfo import ZoneInfo
 from typing import cast
+from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph
@@ -11,6 +11,7 @@ from react_agent import graph as react_graph
 from react_agent.context import Context
 from react_agent.state import InputState, State
 from react_agent.utils import (
+    build_system_prompt_messages,
     build_token_limited_messages,
     is_media_not_supported_error,
     load_chat_model,
@@ -39,16 +40,16 @@ async def no_stream(
     )
 
     # Format the system prompt
-    system_message = runtime.context.system_prompt.format(
-        system_time=datetime.now(ZoneInfo("Asia/Jakarta")).strftime(
-            "%A, %d %B %Y %H:%M:%S WIB"
-        )
+    system_messages = build_system_prompt_messages(
+        runtime.context.system_prompt,
+        datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
+        runtime.context.user_memory,
     )
 
     # Get the model's response
     model_messages = build_token_limited_messages(
         model,
-        system_message,
+        system_messages,
         state.messages,
         num_limit_token=runtime.context.num_limit_token,
         num_limit_response_reserve=runtime.context.num_limit_response_reserve,

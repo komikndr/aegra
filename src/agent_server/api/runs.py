@@ -14,6 +14,7 @@ from langgraph.types import Command, Send
 from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..core.agent_access import ensure_graph_access
 from ..core.auth_ctx import with_auth_ctx
 from ..core.auth_deps import get_current_user
 from ..core.auth_handlers import build_auth_context, handle_event
@@ -28,6 +29,7 @@ from ..services.broker import broker_manager
 from ..services.graph_streaming import stream_graph_events
 from ..services.langgraph_service import create_run_config, get_langgraph_service
 from ..services.streaming_service import streaming_service
+from ..services.user_memory import get_user_memory_context, update_user_memory_from_run
 from ..utils.assistants import resolve_assistant_id
 from ..utils.run_utils import (
     _merge_jsonb,
@@ -233,6 +235,8 @@ async def create_run(
     if not assistant:
         raise HTTPException(404, f"Assistant '{request.assistant_id}' not found")
 
+    ensure_graph_access(user, assistant.graph_id)
+
     config = _merge_jsonb(assistant.config, config)
     context = _merge_jsonb(assistant.context, context)
 
@@ -350,6 +354,8 @@ async def create_and_stream_run(
     assistant = await session.scalar(assistant_stmt)
     if not assistant:
         raise HTTPException(404, f"Assistant '{request.assistant_id}' not found")
+
+    ensure_graph_access(user, assistant.graph_id)
 
     config = _merge_jsonb(assistant.config, config)
     context = _merge_jsonb(assistant.context, context)
@@ -658,6 +664,8 @@ async def wait_for_run(
     if not assistant:
         raise HTTPException(404, f"Assistant '{request.assistant_id}' not found")
 
+    ensure_graph_access(user, assistant.graph_id)
+
     config = _merge_jsonb(assistant.config, config)
     context = _merge_jsonb(assistant.context, context)
 
@@ -940,6 +948,10 @@ async def execute_run_async(
         run_config = create_run_config(
             run_id, thread_id, user, config or {}, checkpoint
         )
+        execution_context = dict(context or {})
+        execution_context["user_memory"] = await get_user_memory_context(
+            session, user.identity
+        )
 
         # Handle human-in-the-loop fields
         if interrupt_before is not None:
@@ -990,7 +1002,7 @@ async def execute_run_async(
                     input_data=execution_input,
                     config=run_config,
                     stream_mode=stream_mode_list,
-                    context=context,
+                    context=execution_context,
                     subgraphs=subgraphs,
                     on_checkpoint=lambda _: None,  # Can add checkpoint handling if needed
                     on_task_result=lambda _: None,  # Can add task result handling if needed
@@ -1068,6 +1080,20 @@ async def execute_run_async(
                     f"No database session available to update thread {thread_id} status"
                 )
             await set_thread_status(session, thread_id, user.identity, "idle")
+            try:
+                await update_user_memory_from_run(
+                    session,
+                    user_id=user.identity,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    input_data=input_data,
+                    output_data=final_output or {},
+                )
+            except Exception as memory_error:
+                await session.rollback()
+                logger.warning(
+                    f"[execute_run_async] user memory update failed run_id={run_id}: {memory_error}"
+                )
 
     except asyncio.CancelledError:
         # Store empty output to avoid JSON serialization issues - use standard status
