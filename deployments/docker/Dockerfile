@@ -65,6 +65,9 @@ COPY libs/aegra-api/alembic.ini ./alembic.ini
 COPY libs/aegra-api/alembic/ ./alembic/
 COPY aegra.json ./aegra.json
 COPY examples/ ./examples/
+COPY graphs/ ./graphs/
+COPY custom_routes_example.py ./custom_routes_example.py
+COPY keycloak_auth.py ./keycloak_auth.py
 
 EXPOSE 2026
 
