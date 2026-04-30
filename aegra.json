@@ -1,15 +1,28 @@
 {
-  "dependencies": ["./examples"],
-  "graphs": {
-    "agent": "./examples/react_agent/graph.py:graph",
-    "agent_hitl": "./examples/react_agent_hitl/graph.py:graph",
-    "subgraph_agent": "./examples/subgraph_agent/graph.py:graph",
-    "subgraph_hitl_agent": "./examples/subgraph_hitl_agent/graph.py:graph",
-    "factory": "./examples/factory/graph.py:graph",
-    "stress_test": "./examples/stress_test/graph.py:graph",
-    "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph"
-  },
-  "http": {
-    "app": "./examples/custom_routes_example.py:app"
-  }
+    "dependencies": ["./examples", "./graphs"],
+    "graphs": {
+        "agent": "./examples/react_agent/graph.py:graph",
+        "agent_hitl": "./examples/react_agent_hitl/graph.py:graph",
+        "subgraph_agent": "./examples/subgraph_agent/graph.py:graph",
+        "subgraph_hitl_agent": "./examples/subgraph_hitl_agent/graph.py:graph",
+        "factory": "./examples/factory/graph.py:graph",
+        "stress_test": "./examples/stress_test/graph.py:graph",
+        "stress_tool_agent": "./examples/stress_tool_agent/graph.py:graph",
+        "normal_agent": "./graphs/react_agent/graph.py:graph",
+        "analytics": "./graphs/react_agent/graph.py:graph",
+        "casual_chat": "./graphs/casual_agent/graph.py:chat_graph",
+        "casual_executive": "./graphs/casual_agent/graph.py:executive_graph",
+        "casual_office": "./graphs/casual_agent/graph.py:office_graph",
+        "casual_artifact_editor": "./graphs/casual_agent/graph.py:artifact_editor_graph",
+        "kms_chat": "./graphs/kms_agent/graph.py:chat_graph",
+        "kms_executive": "./graphs/kms_agent/graph.py:executive_graph",
+        "kms_office": "./graphs/kms_agent/graph.py:office_graph",
+        "kms_artifact_editor": "./graphs/kms_agent/graph.py:artifact_editor_graph",
+        "analytic_chat": "./graphs/analytic_agent/graph.py:chat_graph",
+        "analytic_executive": "./graphs/analytic_agent/graph.py:executive_graph",
+        "analytic_office": "./graphs/analytic_agent/graph.py:office_graph",
+        "analytic_artifact_editor": "./graphs/analytic_agent/graph.py:artifact_editor_graph"
+    },
+    "http": {"app": "./custom_routes_example.py:app", "enable_custom_route_auth": true},
+    "auth": {"path": "./keycloak_auth.py:auth"}
 }

@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.active_runs import active_runs
+from aegra_api.core.agent_access import ensure_graph_access, thread_is_accessible
 from aegra_api.core.auth_deps import auth_dependency, get_current_user
 from aegra_api.core.auth_handlers import build_auth_context, handle_event
 from aegra_api.core.orm import Run as RunORM
@@ -146,6 +147,16 @@ def _serialize_thread(thread_orm: ThreadORM, default_metadata: dict[str, Any] | 
     )
 
 
+def _ensure_thread_access(thread: Thread, user: User) -> None:
+    metadata = thread.metadata or {}
+    graph_id = metadata.get("graph_id") if isinstance(metadata, dict) else None
+    ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
+
+
+def _filter_accessible_threads(threads: list[Thread], user: User) -> list[Thread]:
+    return [thread for thread in threads if thread_is_accessible(thread, user)]
+
+
 # --- Endpoints ---
 
 
@@ -189,7 +200,9 @@ async def create_thread(
 
         if existing:
             if request.if_exists == "do_nothing":
-                return _serialize_thread(existing)
+                serialized_thread = _serialize_thread(existing)
+                _ensure_thread_access(serialized_thread, user)
+                return serialized_thread
             else:
                 raise HTTPException(409, f"Thread '{thread_id}' already exists")
 
@@ -200,6 +213,8 @@ async def create_thread(
     metadata.setdefault("assistant_id", None)
     metadata.setdefault("graph_id", None)
     metadata.setdefault("thread_name", "")
+    graph_id = metadata.get("graph_id")
+    ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
 
     thread_orm = ThreadORM(
         thread_id=thread_id,
@@ -243,7 +258,7 @@ async def list_threads(
     rows = result.all()
 
     # Use safe serialization
-    user_threads = [_serialize_thread(t) for t in rows]
+    user_threads = _filter_accessible_threads([_serialize_thread(t) for t in rows], user)
     return ThreadList(threads=user_threads, total=len(user_threads))
 
 
@@ -268,7 +283,9 @@ async def get_thread(
     if not thread:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
-    return _serialize_thread(thread)
+    serialized_thread = _serialize_thread(thread)
+    _ensure_thread_access(serialized_thread, user)
+    return serialized_thread
 
 
 @router.patch("/threads/{thread_id}", response_model=Thread, responses={**NOT_FOUND})
@@ -303,9 +320,13 @@ async def update_thread(
     if not thread:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
+    _ensure_thread_access(_serialize_thread(thread), user)
+
     thread.updated_at = datetime.now(UTC)
 
     if request.metadata:
+        graph_id = request.metadata.get("graph_id")
+        ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
         current_metadata = dict(thread.metadata_json or {})
         current_metadata.update(request.metadata)
         thread.metadata_json = current_metadata
@@ -338,6 +359,7 @@ async def get_thread_state(
 
         thread_metadata = thread.metadata_json or {}
         graph_id = thread_metadata.get("graph_id")
+        ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
         if not graph_id:
             logger.info(
                 "state GET: no graph_id set for thread %s, returning empty state",
@@ -449,6 +471,7 @@ async def update_thread_state(
 
         thread_metadata = thread.metadata_json or {}
         graph_id = thread_metadata.get("graph_id")
+        ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
         if not graph_id:
             raise HTTPException(
                 400,
@@ -576,6 +599,7 @@ async def get_thread_state_at_checkpoint(
 
         thread_metadata = thread.metadata_json or {}
         graph_id = thread_metadata.get("graph_id")
+        ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
         if not graph_id:
             raise HTTPException(404, f"Thread '{thread_id}' has no associated graph")
 
@@ -696,6 +720,7 @@ async def get_thread_history_post(
 
         thread_metadata = thread.metadata_json or {}
         graph_id = thread_metadata.get("graph_id")
+        ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
         if not graph_id:
             logger.info(f"history POST: no graph_id set for thread {thread_id}")
             return []
@@ -823,6 +848,8 @@ async def delete_thread(
     if not thread:
         raise HTTPException(404, f"Thread '{thread_id}' not found")
 
+    _ensure_thread_access(_serialize_thread(thread), user)
+
     active_runs_stmt = select(RunORM).where(
         RunORM.thread_id == thread_id,
         RunORM.user_id == user.identity,
@@ -894,6 +921,6 @@ async def search_threads(
     rows = result.all()
 
     # Use safe serialization
-    threads_models = [_serialize_thread(t) for t in rows]
+    threads_models = _filter_accessible_threads([_serialize_thread(t) for t in rows], user)
 
     return threads_models

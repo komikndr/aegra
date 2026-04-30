@@ -13,6 +13,7 @@ import structlog
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.core.auth_ctx import with_auth_ctx
+from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
 from aegra_api.services.broker import broker_manager
@@ -20,6 +21,7 @@ from aegra_api.services.graph_streaming import stream_graph_events
 from aegra_api.services.langgraph_service import create_run_config, get_langgraph_service
 from aegra_api.services.run_status import finalize_run, update_run_status
 from aegra_api.services.streaming_service import streaming_service
+from aegra_api.services.user_memory import get_user_memory_context, update_user_memory_from_run
 from aegra_api.settings import settings
 from aegra_api.utils.run_utils import map_command_to_langgraph
 
@@ -69,6 +71,7 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="idle",
                 output=final_output.data,
             )
+            await _best_effort_update_user_memory(job, final_output.data)
 
     except asyncio.CancelledError:
         if run_id in _lease_loss_cancellations:
@@ -129,6 +132,7 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
     run_id = job.identity.run_id
     run_config = _build_run_config(job)
     execution_input = _resolve_input(job)
+    execution_context = await _build_execution_context(job)
     stream_modes = _resolve_stream_modes(job.execution.stream_mode)
 
     langgraph_service = get_langgraph_service()
@@ -140,7 +144,7 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
             config=run_config,
             access_context="threads.create_run",
             user=job.user,
-            context=job.execution.context,
+            context=execution_context,
         ) as graph,
         with_auth_ctx(job.user, job.user.permissions),  # type: ignore[arg-type]
     ):
@@ -149,7 +153,7 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
             input_data=execution_input,
             config=run_config,
             stream_mode=stream_modes,
-            context=job.execution.context,
+            context=execution_context,
             subgraphs=job.behavior.subgraphs,
             on_checkpoint=lambda _: None,
             on_task_result=lambda _: None,
@@ -163,6 +167,33 @@ async def _stream_graph(job: RunJob) -> _GraphResult:
                 result.data = event_data
 
     return result
+
+
+async def _build_execution_context(job: RunJob) -> dict[str, Any]:
+    execution_context = dict(job.execution.context or {})
+    try:
+        maker = _get_session_maker()
+        async with maker() as session:
+            execution_context["user_memory"] = await get_user_memory_context(session, job.user.identity)
+    except Exception:
+        logger.warning("User memory load failed (best-effort)", run_id=job.identity.run_id, exc_info=True)
+    return execution_context
+
+
+async def _best_effort_update_user_memory(job: RunJob, output_data: Any) -> None:
+    try:
+        maker = _get_session_maker()
+        async with maker() as session:
+            await update_user_memory_from_run(
+                session,
+                user_id=job.user.identity,
+                thread_id=job.identity.thread_id,
+                run_id=job.identity.run_id,
+                input_data=job.execution.input_data,
+                output_data=output_data,
+            )
+    except Exception:
+        logger.warning("User memory update failed (best-effort)", run_id=job.identity.run_id, exc_info=True)
 
 
 def _build_run_config(job: RunJob) -> dict[str, Any]:

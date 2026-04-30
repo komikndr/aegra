@@ -1,0 +1,267 @@
+{
+  "realm": "aegra",
+  "enabled": true,
+  "displayName": "Aegra",
+  "roles": {
+    "realm": [
+      {
+        "name": "SuperAdmin"
+      },
+      {
+        "name": "Executive"
+      },
+      {
+        "name": "Senior Data Engineer"
+      },
+      {
+        "name": "Staff"
+      }
+    ]
+  },
+  "registrationAllowed": false,
+  "registrationEmailAsUsername": false,
+  "loginWithEmailAllowed": true,
+  "duplicateEmailsAllowed": false,
+  "resetPasswordAllowed": true,
+  "editUsernameAllowed": false,
+  "sslRequired": "external",
+  "clients": [
+    {
+      "clientId": "executive-frontend",
+      "name": "Executive Frontend",
+      "description": "Public SPA client for Executive AI Canvas",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/*",
+        "http://10.10.5.190:3000/*"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://10.10.5.190:3000"
+      ],
+      "protocolMappers": [
+        {
+          "name": "audience-aegra-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "aegra-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "executive-nextauth",
+      "name": "Executive NextAuth",
+      "description": "Confidential OIDC client for NextAuth server-side auth",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "changeme",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:3000/api/auth/callback/keycloak",
+        "http://10.10.5.190:3000/api/auth/callback/keycloak"
+      ],
+      "webOrigins": [
+        "http://localhost:3000",
+        "http://10.10.5.190:3000"
+      ],
+      "protocolMappers": [
+        {
+          "name": "audience-aegra-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "aegra-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "aegra-api",
+      "name": "Aegra API",
+      "description": "Confidential client for Aegra server and API calls",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "changeme",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:8111/*",
+        "http://localhost:8000/*",
+        "http://localhost/*",
+        "http://10.10.5.190:8111/*",
+        "http://10.10.5.190/*"
+      ],
+      "webOrigins": [
+        "*"
+      ],
+      "protocolMappers": [
+        {
+          "name": "audience-aegra-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "aegra-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
+      "clientId": "minio-console",
+      "name": "MinIO Console",
+      "description": "Confidential OIDC client for MinIO console login",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "changeme",
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "implicitFlowEnabled": false,
+      "redirectUris": [
+        "http://localhost:9001/oauth_callback",
+        "http://10.10.5.190:9001/oauth_callback"
+      ],
+      "webOrigins": [
+        "http://localhost:9001",
+        "http://10.10.5.190:9001"
+      ]
+    }
+  ],
+  "users": [
+    {
+      "username": "aegra-user",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Aegra",
+      "lastName": "User",
+      "email": "aegra-user@localhost",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "aegralocal",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "SuperAdmin"
+      ]
+    },
+    {
+      "username": "onyx-user",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Onyx",
+      "lastName": "User",
+      "email": "onyx-user@localhost",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "onyxlocal",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "SuperAdmin"
+      ]
+    },
+    {
+      "username": "superadmin-user",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Super",
+      "lastName": "Admin",
+      "email": "superadmin-user@localhost",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "changeme",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "SuperAdmin"
+      ]
+    },
+    {
+      "username": "executive-user",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Executive",
+      "lastName": "User",
+      "email": "executive-user@localhost",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "changeme",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "Executive"
+      ]
+    },
+    {
+      "username": "staff-user",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Staff",
+      "lastName": "User",
+      "email": "staff-user@localhost",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "stafflocal",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "Staff"
+      ]
+    },
+    {
+      "username": "sr-data-engineer",
+      "enabled": true,
+      "emailVerified": true,
+      "firstName": "Senior",
+      "lastName": "Data Engineer",
+      "email": "sr-data-engineer@localhost",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "sr-datalocal",
+          "temporary": false
+        }
+      ],
+      "realmRoles": [
+        "Senior Data Engineer"
+      ]
+    }
+  ]
+}

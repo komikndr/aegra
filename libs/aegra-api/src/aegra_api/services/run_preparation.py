@@ -14,6 +14,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.core.agent_access import ensure_graph_access
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
@@ -204,6 +205,8 @@ async def _prepare_run(
     assistant = await session.scalar(assistant_stmt)
     if not assistant:
         raise HTTPException(404, f"Assistant '{request.assistant_id}' not found")
+
+    ensure_graph_access(user, assistant.graph_id)
 
     config = _merge_jsonb(assistant.config, config)
     context = _merge_jsonb(assistant.context, context)

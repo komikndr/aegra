@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:18
+    env_file:
+      - ${APP_ENV_FILE:-.env.staging}
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  aegra:
+    build:
+      context: .
+      dockerfile: deployments/docker/Dockerfile
+    ports:
+      - "${PORT:-8111}:${PORT:-8111}"
+    env_file:
+      - ${APP_ENV_FILE:-.env.staging}
+    environment:
+      POSTGRES_HOST: postgres
+      KEYCLOAK_JWKS_URL: ${KEYCLOAK_JWKS_URL:-http://10.10.5.190:8080/realms/${KEYCLOAK_REALM:-aegra}/protocol/openid-connect/certs}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+    command: >
+      sh -c "
+        echo 'Running database migrations...' &&
+        alembic upgrade head &&
+        echo 'Starting Aegra server...' &&
+        uvicorn src.agent_server.main:app --host 0.0.0.0 --port $${PORT:-8111}
+      "
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.0
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KEYCLOAK_ADMIN_USER}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KC_HEALTH_ENABLED: "true"
+      KC_METRICS_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_PROXY_HEADERS: xforwarded
+      KC_HOSTNAME: ${KEYCLOAK_HOSTNAME:-10.10.5.190}
+      KC_HOSTNAME_STRICT: ${KEYCLOAK_HOSTNAME_STRICT:-false}
+    command: start --http-port=8080 --import-realm
+    ports:
+      - "8080:8080"
+    volumes:
+      - keycloak_data:/opt/keycloak/data
+      - ${KEYCLOAK_REALM_IMPORT_FILE:-/home/kms/onyx_ai_secret/keycloak-realm-aegra.staging.json}:/opt/keycloak/data/import/keycloak-realm-aegra.json:ro
+
+  keycloak-init:
+    image: quay.io/keycloak/keycloak:26.0
+    depends_on:
+      keycloak:
+        condition: service_started
+    environment:
+      KEYCLOAK_ADMIN_USER: ${KEYCLOAK_ADMIN_USER}
+      KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD}
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-aegra}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-aegra-api}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET}
+      KEYCLOAK_NEXTAUTH_CLIENT_ID: ${KEYCLOAK_NEXTAUTH_CLIENT_ID:-executive-nextauth}
+      KEYCLOAK_NEXTAUTH_CLIENT_SECRET: ${KEYCLOAK_NEXTAUTH_CLIENT_SECRET}
+      KEYCLOAK_NEXTAUTH_REDIRECT_URI: ${KEYCLOAK_NEXTAUTH_REDIRECT_URI:-http://10.10.5.190:3000/api/auth/callback/keycloak}
+      KEYCLOAK_NEXTAUTH_WEB_ORIGIN: ${KEYCLOAK_NEXTAUTH_WEB_ORIGIN:-http://10.10.5.190:3000}
+      MINIO_OIDC_CLIENT_ID: ${MINIO_OIDC_CLIENT_ID:-minio-console}
+      MINIO_OIDC_CLIENT_SECRET: ${MINIO_OIDC_CLIENT_SECRET}
+      MINIO_OIDC_REDIRECT_URI: ${MINIO_OIDC_REDIRECT_URI:-http://10.10.5.190:9001/oauth_callback}
+      MINIO_OIDC_WEB_ORIGIN: ${MINIO_OIDC_WEB_ORIGIN:-http://10.10.5.190:9001}
+    volumes:
+      - ./ops/keycloak/init-minio-client.sh:/opt/keycloak-init/init-minio-client.sh:ro
+    entrypoint: ["/bin/sh", "/opt/keycloak-init/init-minio-client.sh"]
+    restart: "no"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    profiles:
+      - redis
+
+volumes:
+  postgres_data:
+  redis_data:
+  keycloak_data:

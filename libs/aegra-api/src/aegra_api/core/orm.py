@@ -134,6 +134,63 @@ class Run(Base):
     )
 
 
+class ExecutiveArtifact(Base):
+    __tablename__ = "executive_artifacts"
+
+    artifact_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    thread_id: Mapped[str] = mapped_column(Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=False)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str | None] = mapped_column(Text)
+    artifact_kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'executive_report'"))
+    source_message_id: Mapped[str | None] = mapped_column(Text)
+    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index("idx_executive_artifacts_thread_id", "thread_id"),
+        Index("idx_executive_artifacts_user_id", "user_id"),
+        Index("idx_executive_artifacts_created_at", "created_at"),
+    )
+
+
+class UserMemory(Base):
+    __tablename__ = "user_memories"
+
+    memory_id: Mapped[str] = mapped_column(
+        Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text")
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'fact'"))
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_thread_id: Mapped[str | None] = mapped_column(Text)
+    source_run_id: Mapped[str | None] = mapped_column(Text)
+    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index("idx_user_memories_user", "user_id"),
+        Index("idx_user_memories_user_content", "user_id", "content", unique=True),
+    )
+
+
+class UserMemorySnapshot(Base):
+    __tablename__ = "user_memory_snapshots"
+
+    user_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    content: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+    memory_hash: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (Index("idx_user_memory_snapshots_updated_at", "updated_at"),)
+
+
 # ---------------------------------------------------------------------------
 # Session factory
 # ---------------------------------------------------------------------------
