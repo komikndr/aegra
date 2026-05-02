@@ -62,6 +62,20 @@ docker compose up
 
 Open [http://localhost:2026/docs](http://localhost:2026/docs) to explore the API.
 
+## Installation Profile
+
+The default installation profile starts these services:
+
+- `postgres`: primary database for threads, runs, checkpoints, and custom metadata
+- `aegra`: FastAPI server that serves the LangGraph-compatible API and custom routes
+- `keycloak`: local identity provider used by the default auth configuration
+
+An additional Docker Compose profile is available:
+
+- `redis`: optional service enabled with `docker compose --profile redis up`.
+
+The `redis` profile is not required for the standard local setup. It exists for optional queueing or future extensions.
+
 Your existing LangGraph code works without changes:
 
 ```python

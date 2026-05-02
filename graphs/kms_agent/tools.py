@@ -98,6 +98,10 @@ def get_vector_store(context: Context) -> OpenSearchVectorSearch | None:
     )
 
 
+def _kms_unavailable_message() -> str:
+    return "KMS vector store is not configured. Set the KMS_OPENSEARCH_* env vars first."
+
+
 def serialize_documents(documents: list[Document]) -> list[dict[str, Any]]:
     return [
         {
@@ -106,10 +110,6 @@ def serialize_documents(documents: list[Document]) -> list[dict[str, Any]]:
         }
         for document in documents
     ]
-
-
-def _kms_unavailable_message() -> str:
-    return "KMS vector store is not configured. Set the KMS_OPENSEARCH_* env vars first."
 
 
 async def kms_vector_search(query: str, k: int | None = None) -> dict[str, Any]:

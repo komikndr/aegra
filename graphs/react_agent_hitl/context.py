@@ -67,6 +67,34 @@ class Context:
         },
     )
 
+    num_limit_token: int = field(
+        default=65536,
+        metadata={
+            "description": "Hard token window limit for model context. Messages are pruned before model invocation when this budget is exceeded."
+        },
+    )
+
+    num_limit_response_reserve: int = field(
+        default=4096,
+        metadata={
+            "description": "Reserved tokens for the model response, excluded from input context budget."
+        },
+    )
+
+    num_limit_safety_buffer: int = field(
+        default=1024,
+        metadata={
+            "description": "Extra safety margin removed from available input budget to avoid provider-specific tokenizer drift."
+        },
+    )
+
+    num_limit_min_recent_messages: int = field(
+        default=6,
+        metadata={
+            "description": "Minimum number of most recent non-system messages to keep before aggressive pruning."
+        },
+    )
+
     def __post_init__(self) -> None:
         """Fetch env vars for attributes that were not passed as args."""
         for f in fields(self):

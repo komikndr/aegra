@@ -242,8 +242,9 @@ def apply_user_namespace_scoping(user_id: str, namespace: list[str]) -> list[str
     if not namespace:
         return ["users", user_id]
 
-    if namespace[0] == "users" and len(namespace) >= 2 and namespace[1] == user_id:
-        return namespace
+    if namespace[0] == "users":
+        if len(namespace) >= 2 and namespace[1] == user_id:
+            return namespace
+        raise HTTPException(403, "Namespace access denied")
 
-    # Scope any other namespace under the user's prefix
-    return ["users", user_id] + namespace
+    return ["users", user_id, *namespace]
