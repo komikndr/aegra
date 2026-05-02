@@ -13,7 +13,7 @@ from typing import Any
 
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
 
 _MODEL_CACHE_TTL_SECONDS = 10.0
 _active_model_cache: dict[str, tuple[float, str | None]] = {}
@@ -91,6 +91,9 @@ def get_active_model_name(base_url: str | None = None) -> str | None:
 
 
 def resolve_model_name(fully_specified_name: str) -> tuple[str, str]:
+    if "/" not in fully_specified_name:
+        return "openai", fully_specified_name
+
     provider, configured_model = fully_specified_name.split("/", maxsplit=1)
     if provider != "vllm":
         return provider, configured_model
@@ -206,29 +209,24 @@ def build_token_limited_messages(
     return payload
 
 
-def build_system_prompt_messages(system_prompt: str, system_time: str, user_memory: str) -> list[dict[str, str]]:
+def build_system_prompt_messages(system_prompt: str, system_time: str, user_memory: str) -> list[SystemMessage]:
     stable_prompt = system_prompt.replace("\n\nSystem time: {system_time}", "").strip()
-    messages = [{"role": "system", "content": stable_prompt}]
+    content_parts = [stable_prompt]
     memory = user_memory.strip()
     if memory:
-        messages.append(
-            {
-                "role": "system",
-                "content": (
-                    "Cross-agent user memory\n"
-                    "Use this stable cross-agent memory only when it is relevant. "
-                    "Do not mention this memory block unless the user asks.\n\n"
-                    f"{memory}"
-                ),
-            }
+        content_parts.append(
+            "Cross-agent user memory\n"
+            "Use this stable cross-agent memory only when it is relevant. "
+            "Do not mention this memory block unless the user asks.\n\n"
+            f"{memory}"
         )
-    messages.append({"role": "system", "content": f"System time: {system_time}"})
-    return messages
+    content_parts.append(f"System time: {system_time}")
+    return [SystemMessage(content="\n\n".join(content_parts))]
 
 
 def _normalize_system_messages(system_message: str | Sequence[Any]) -> list[Any]:
     if isinstance(system_message, str):
-        return [{"role": "system", "content": system_message}]
+        return [SystemMessage(content=system_message)]
     return list(system_message)
 
 

@@ -15,6 +15,7 @@
         "casual_office": "./graphs/casual_agent/graph.py:office_graph",
         "casual_artifact_editor": "./graphs/casual_agent/graph.py:artifact_editor_graph",
         "kms_chat": "./graphs/kms_agent/graph.py:chat_graph",
+        "qa_chat": "./graphs/qa_agent/graph.py:chat_graph",
         "kms_executive": "./graphs/kms_agent/graph.py:executive_graph",
         "kms_office": "./graphs/kms_agent/graph.py:office_graph",
         "kms_artifact_editor": "./graphs/kms_agent/graph.py:artifact_editor_graph",

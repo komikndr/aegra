@@ -228,6 +228,7 @@ async def model_info(user: User = Depends(require_auth)):
         "configured_model": configured_model,
         "active_model": f"{resolved_provider}/{resolved_model}",
         "active_model_name": resolved_model,
+        "display_model_name": resolved_model,
         "provider": resolved_provider,
         "vllm_base_url": os.environ.get("VLLM_BASE_URL", "").strip() or None,
         "openai_base_url": os.environ.get("OPENAI_BASE_URL", "").strip() or None,

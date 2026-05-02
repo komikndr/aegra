@@ -6,10 +6,11 @@ from fastapi import HTTPException
 
 from ..models import Assistant, Thread, User
 
-KNOWN_AGENT_IDS = {"kms", "analytic", "casual"}
+KNOWN_AGENT_IDS = {"kms", "qa", "analytic", "casual"}
+PUBLIC_AGENT_IDS = {"qa"}
 EXECUTIVE_AGENT_IDS = {"analytic", "casual"}
 STAFF_AGENT_IDS = {"kms"}
-DEFAULT_AGENT_IDS = {"casual"}
+DEFAULT_AGENT_IDS = {"qa", "casual"}
 
 
 def _normalize_role(role: str) -> str:
@@ -31,7 +32,7 @@ def get_allowed_agent_ids(permissions: Iterable[str] | None) -> set[str]:
     if "superadmin" in roles:
         return set(KNOWN_AGENT_IDS)
 
-    allowed_agent_ids: set[str] = set()
+    allowed_agent_ids: set[str] = set(PUBLIC_AGENT_IDS)
 
     if "executive" in roles or "seniordataengineer" in roles:
         allowed_agent_ids.update(EXECUTIVE_AGENT_IDS)
@@ -39,7 +40,10 @@ def get_allowed_agent_ids(permissions: Iterable[str] | None) -> set[str]:
     if "staff" in roles:
         allowed_agent_ids.update(STAFF_AGENT_IDS)
 
-    return allowed_agent_ids or set(DEFAULT_AGENT_IDS)
+    if allowed_agent_ids == PUBLIC_AGENT_IDS:
+        allowed_agent_ids.update(DEFAULT_AGENT_IDS)
+
+    return allowed_agent_ids
 
 
 def get_agent_id_from_graph_id(graph_id: str | None) -> str | None:

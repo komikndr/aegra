@@ -75,7 +75,10 @@ def _get_vector_store(
 
 def _vector_store_from_runtime() -> OpenSearchVectorSearch | None:
     runtime = get_runtime(Context)
-    context = runtime.context
+    return get_vector_store(runtime.context)
+
+
+def get_vector_store(context: Context) -> OpenSearchVectorSearch | None:
     if not _kms_configured(context):
         return None
 
@@ -95,11 +98,7 @@ def _vector_store_from_runtime() -> OpenSearchVectorSearch | None:
     )
 
 
-def _kms_unavailable_message() -> str:
-    return "KMS vector store is not configured. Set the KMS_OPENSEARCH_* env vars first."
-
-
-def _serialize_documents(documents: list[Document]) -> list[dict[str, Any]]:
+def serialize_documents(documents: list[Document]) -> list[dict[str, Any]]:
     return [
         {
             "content": document.page_content,
@@ -107,6 +106,10 @@ def _serialize_documents(documents: list[Document]) -> list[dict[str, Any]]:
         }
         for document in documents
     ]
+
+
+def _kms_unavailable_message() -> str:
+    return "KMS vector store is not configured. Set the KMS_OPENSEARCH_* env vars first."
 
 
 async def kms_vector_search(query: str, k: int | None = None) -> dict[str, Any]:
@@ -126,7 +129,7 @@ async def kms_vector_search(query: str, k: int | None = None) -> dict[str, Any]:
         "available": True,
         "index": runtime.context.kms_opensearch_index,
         "query": query,
-        "matches": _serialize_documents(documents),
+        "matches": serialize_documents(documents),
     }
 
 
