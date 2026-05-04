@@ -10,6 +10,7 @@ from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from react_agent.state import InputState, State
 from react_agent.utils import (
+    apply_reasoning_effort,
     build_system_prompt_messages,
     build_token_limited_messages,
     is_media_not_supported_error,
@@ -28,6 +29,7 @@ from kms_agent.tools import TOOLS
 
 async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, list[AIMessage]]:
     model = load_chat_model(runtime.context.model).bind_tools(TOOLS)
+    model = apply_reasoning_effort(model, runtime.context.model, runtime.context.reasoning_effort)
     system_messages = build_system_prompt_messages(
         runtime.context.system_prompt,
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),

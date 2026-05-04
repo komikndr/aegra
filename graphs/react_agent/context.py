@@ -81,6 +81,13 @@ class Context:
         metadata={"description": "Stable cross-agent user memory injected by the server."},
     )
 
+    reasoning_effort: str = field(
+        default="low",
+        metadata={
+            "description": "Reasoning effort for OpenAI-compatible reasoning models: none, low/default, medium, high, or ultra."
+        },
+    )
+
     def __post_init__(self) -> None:
         """Fetch env vars for attributes that were not passed as args."""
         for f in fields(self):

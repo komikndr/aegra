@@ -6,6 +6,7 @@ import json
 import os
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections.abc import Sequence
 from math import ceil
@@ -17,6 +18,14 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 
 _MODEL_CACHE_TTL_SECONDS = 10.0
 _active_model_cache: dict[str, tuple[float, str | None]] = {}
+_OPENAI_REASONING_PATCHED = False
+_REASONING_BUDGET_TOKENS = {
+    "none": 0,
+    "low": 512,
+    "medium": 1024,
+    "high": 4096,
+    "ultra": 12288,
+}
 
 
 def get_message_text(msg: BaseMessage) -> str:
@@ -116,6 +125,9 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
     """
     provider, model = resolve_model_name(fully_specified_name)
 
+    if provider in {"openai", "vllm"}:
+        _patch_openai_reasoning_conversion()
+
     if provider == "vllm":
         base_url = os.environ.get("VLLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
         init_kwargs: dict[str, Any] = {
@@ -133,6 +145,83 @@ def load_chat_model(fully_specified_name: str) -> BaseChatModel:
             init_kwargs["base_url"] = base_url
 
     return init_chat_model(model, **init_kwargs)
+
+
+def _patch_openai_reasoning_conversion() -> None:
+    """Preserve llama.cpp/vLLM reasoning_content dropped by ChatOpenAI."""
+    global _OPENAI_REASONING_PATCHED
+    if _OPENAI_REASONING_PATCHED:
+        return
+
+    try:
+        from langchain_core.messages import AIMessage, AIMessageChunk
+        from langchain_openai.chat_models import base as openai_base
+    except Exception:
+        return
+
+    original_delta_converter = openai_base._convert_delta_to_message_chunk
+    original_message_converter = openai_base._convert_dict_to_message
+
+    def convert_delta_with_reasoning(delta: Any, default_class: Any) -> Any:
+        chunk = original_delta_converter(delta, default_class)
+        reasoning = delta.get("reasoning_content") if isinstance(delta, dict) else None
+        if isinstance(chunk, AIMessageChunk) and isinstance(reasoning, str) and reasoning:
+            additional_kwargs = dict(chunk.additional_kwargs)
+            additional_kwargs["reasoning_content"] = reasoning
+            return chunk.model_copy(update={"additional_kwargs": additional_kwargs})
+        return chunk
+
+    def convert_message_with_reasoning(message: Any) -> Any:
+        converted = original_message_converter(message)
+        reasoning = message.get("reasoning_content") if isinstance(message, dict) else None
+        if isinstance(converted, AIMessage) and isinstance(reasoning, str) and reasoning:
+            additional_kwargs = dict(converted.additional_kwargs)
+            additional_kwargs["reasoning_content"] = reasoning
+            return converted.model_copy(update={"additional_kwargs": additional_kwargs})
+        return converted
+
+    openai_base._convert_delta_to_message_chunk = convert_delta_with_reasoning
+    openai_base._convert_dict_to_message = convert_message_with_reasoning
+    _OPENAI_REASONING_PATCHED = True
+
+
+def normalize_reasoning_effort(reasoning_effort: str | None) -> str:
+    normalized = (reasoning_effort or "low").strip().lower()
+    if normalized in _REASONING_BUDGET_TOKENS:
+        return normalized
+    return "low"
+
+
+def _is_official_openai_base_url(base_url: str | None) -> bool:
+    if not base_url:
+        return True
+
+    parsed = urllib.parse.urlparse(base_url.strip())
+    return parsed.netloc.lower() == "api.openai.com" and parsed.path.rstrip("/") in {"", "/v1"}
+
+
+def _reasoning_model_kwargs(fully_specified_name: str, reasoning_effort: str | None) -> dict[str, Any]:
+    effort = normalize_reasoning_effort(reasoning_effort)
+    provider, _ = resolve_model_name(fully_specified_name)
+    openai_base_url = os.environ.get("OPENAI_BASE_URL")
+
+    if provider == "openai" and _is_official_openai_base_url(openai_base_url):
+        # Chat Completions currently rejects both llama-style thinking budgets
+        # and reasoning_effort for some OpenAI models deployed here. OpenAI also
+        # does not return visible reasoning text, so avoid breaking generation.
+        return {}
+
+    if provider in {"openai", "vllm"}:
+        return {"extra_body": {"thinking_budget_tokens": _REASONING_BUDGET_TOKENS[effort]}}
+
+    return {}
+
+
+def apply_reasoning_effort(model: Any, fully_specified_name: str, reasoning_effort: str | None) -> Any:
+    kwargs = _reasoning_model_kwargs(fully_specified_name, reasoning_effort)
+    if not kwargs:
+        return model
+    return model.bind(**kwargs)
 
 
 def _estimate_text_tokens(text: str) -> int:

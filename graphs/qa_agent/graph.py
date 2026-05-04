@@ -10,6 +10,7 @@ from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
 from react_agent.state import InputState, State
 from react_agent.utils import (
+    apply_reasoning_effort,
     build_system_prompt_messages,
     build_token_limited_messages,
     get_message_text,
@@ -66,6 +67,7 @@ def _retrieve_context(runtime: Runtime[ChatContext], query: str) -> str:
 
 async def call_model(state: State, runtime: Runtime[ChatContext]) -> dict[str, list[AIMessage]]:
     model = load_chat_model(runtime.context.model)
+    model = apply_reasoning_effort(model, runtime.context.model, "none")
     retrieval_context = _retrieve_context(runtime, _latest_user_query(list(state.messages)))
     system_prompt = f"{runtime.context.system_prompt}\n\n{retrieval_context}"
     system_messages = build_system_prompt_messages(
