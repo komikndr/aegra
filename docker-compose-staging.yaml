@@ -34,7 +34,7 @@ services:
         echo 'Running database migrations...' &&
         alembic upgrade head &&
         echo 'Starting Aegra server...' &&
-        uvicorn src.agent_server.main:app --host 0.0.0.0 --port $${PORT:-8111}
+        uvicorn aegra_api.main:app --host 0.0.0.0 --port $${PORT:-8111}
       "
 
   keycloak:
