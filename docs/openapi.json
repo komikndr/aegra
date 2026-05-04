@@ -3224,10 +3224,16 @@
             "default": {}
           },
           "graph_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Graph Id",
-            "description": "The ID of the graph",
-            "default": "agent"
+            "description": "The ID of the graph"
           },
           "context": {
             "anyOf": [
@@ -3261,6 +3267,28 @@
         "type": "object",
         "title": "AssistantUpdate",
         "description": "Request model for creating assistants"
+      },
+      "Body_analyze_images_custom_analyze_images_post": {
+        "properties": {
+          "prompt": {
+            "type": "string",
+            "title": "Prompt",
+            "default": ""
+          },
+          "files": {
+            "items": {
+              "type": "string",
+              "format": "binary"
+            },
+            "type": "array",
+            "title": "Files"
+          }
+        },
+        "type": "object",
+        "required": [
+          "files"
+        ],
+        "title": "Body_analyze_images_custom_analyze_images_post"
       },
       "Body_set_assistant_latest_assistants__assistant_id__latest_post": {
         "properties": {
