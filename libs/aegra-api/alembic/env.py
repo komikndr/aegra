@@ -19,7 +19,7 @@ config = context.config
 
 # Override the URL from settings — this respects DATABASE_URL, individual
 # POSTGRES_* vars, and preserves query params (e.g. ?sslmode=require).
-config.set_main_option("sqlalchemy.url", settings.db.database_url)
+config.set_main_option("sqlalchemy.url", settings.db.database_url.replace("%", "%%"))
 
 # Interpret the config file for Python logging.
 # Only reconfigure logging when running from CLI (main thread).
