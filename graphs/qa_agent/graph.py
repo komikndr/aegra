@@ -8,9 +8,11 @@ from kms_agent.tools import get_vector_store, serialize_documents
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langgraph.graph import StateGraph
 from langgraph.runtime import Runtime
+from react_agent.model_config import resolve_agent_model
 from react_agent.state import InputState, State
 from react_agent.utils import (
     apply_reasoning_effort,
+    build_reasoning_storage_update,
     build_system_prompt_messages,
     build_token_limited_messages,
     get_message_text,
@@ -66,8 +68,22 @@ def _retrieve_context(runtime: Runtime[ChatContext], query: str) -> str:
 
 
 async def call_model(state: State, runtime: Runtime[ChatContext]) -> dict[str, list[AIMessage]]:
-    model = load_chat_model(runtime.context.model)
-    model = apply_reasoning_effort(model, runtime.context.model, "none")
+    model_config = resolve_agent_model(
+        runtime.context.agent_id,
+        context_model=runtime.context.model,
+        context_window=runtime.context.num_limit_token,
+        response_reserve=runtime.context.num_limit_response_reserve,
+        safety_buffer=runtime.context.num_limit_safety_buffer,
+        min_recent_messages=runtime.context.num_limit_min_recent_messages,
+    )
+    model = load_chat_model(model_config.model, base_url=model_config.base_url, api_key=model_config.api_key)
+    model = apply_reasoning_effort(
+        model,
+        model_config.model,
+        "none",
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+    )
     retrieval_context = _retrieve_context(runtime, _latest_user_query(list(state.messages)))
     system_prompt = f"{runtime.context.system_prompt}\n\n{retrieval_context}"
     system_messages = build_system_prompt_messages(
@@ -79,10 +95,18 @@ async def call_model(state: State, runtime: Runtime[ChatContext]) -> dict[str, l
         model,
         system_messages,
         state.messages,
-        num_limit_token=runtime.context.num_limit_token,
-        num_limit_response_reserve=runtime.context.num_limit_response_reserve,
-        num_limit_safety_buffer=runtime.context.num_limit_safety_buffer,
-        num_limit_min_recent_messages=runtime.context.num_limit_min_recent_messages,
+        num_limit_token=model_config.context_window
+        if model_config.context_window is not None
+        else runtime.context.num_limit_token,
+        num_limit_response_reserve=model_config.response_reserve
+        if model_config.response_reserve is not None
+        else runtime.context.num_limit_response_reserve,
+        num_limit_safety_buffer=model_config.safety_buffer
+        if model_config.safety_buffer is not None
+        else runtime.context.num_limit_safety_buffer,
+        num_limit_min_recent_messages=model_config.min_recent_messages
+        if model_config.min_recent_messages is not None
+        else runtime.context.num_limit_min_recent_messages,
     )
     try:
         response = cast("AIMessage", await model.ainvoke(model_messages))
@@ -92,7 +116,7 @@ async def call_model(state: State, runtime: Runtime[ChatContext]) -> dict[str, l
         else:
             raise
 
-    return {"messages": [response]}
+    return {"messages": build_reasoning_storage_update(state.messages, response)}
 
 
 def build_graph(context_schema: type[ChatContext], name: str):

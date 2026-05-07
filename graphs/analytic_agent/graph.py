@@ -8,12 +8,16 @@ from langchain_core.messages import AIMessage
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
+from react_agent.model_config import resolve_agent_model
 from react_agent.state import InputState, State
 from react_agent.utils import (
     apply_reasoning_effort,
+    build_reasoning_storage_update,
     build_system_prompt_messages,
     build_token_limited_messages,
     is_media_not_supported_error,
+    is_tool_choice_not_supported_error,
+    is_vllm_base_url,
     load_chat_model,
 )
 
@@ -28,8 +32,31 @@ from analytic_agent.tools import TOOLS
 
 
 async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, list[AIMessage]]:
-    model = load_chat_model(runtime.context.model).bind_tools(TOOLS)
-    model = apply_reasoning_effort(model, runtime.context.model, runtime.context.reasoning_effort)
+    model_config = resolve_agent_model(
+        runtime.context.agent_id,
+        context_model=runtime.context.model,
+        context_window=runtime.context.num_limit_token,
+        response_reserve=runtime.context.num_limit_response_reserve,
+        safety_buffer=runtime.context.num_limit_safety_buffer,
+        min_recent_messages=runtime.context.num_limit_min_recent_messages,
+    )
+    base_model = load_chat_model(model_config.model, base_url=model_config.base_url, api_key=model_config.api_key)
+    vllm_without_tool_parser = is_vllm_base_url(model_config.base_url, api_key=model_config.api_key)
+    model = base_model if vllm_without_tool_parser else base_model.bind_tools(TOOLS)
+    model = apply_reasoning_effort(
+        model,
+        model_config.model,
+        runtime.context.reasoning_effort,
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+    )
+    fallback_model = apply_reasoning_effort(
+        base_model,
+        model_config.model,
+        runtime.context.reasoning_effort,
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+    )
     system_messages = build_system_prompt_messages(
         runtime.context.system_prompt,
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
@@ -39,30 +66,37 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         model,
         system_messages,
         state.messages,
-        num_limit_token=runtime.context.num_limit_token,
-        num_limit_response_reserve=runtime.context.num_limit_response_reserve,
-        num_limit_safety_buffer=runtime.context.num_limit_safety_buffer,
-        num_limit_min_recent_messages=runtime.context.num_limit_min_recent_messages,
+        num_limit_token=model_config.context_window
+        if model_config.context_window is not None
+        else runtime.context.num_limit_token,
+        num_limit_response_reserve=model_config.response_reserve
+        if model_config.response_reserve is not None
+        else runtime.context.num_limit_response_reserve,
+        num_limit_safety_buffer=model_config.safety_buffer
+        if model_config.safety_buffer is not None
+        else runtime.context.num_limit_safety_buffer,
+        num_limit_min_recent_messages=model_config.min_recent_messages
+        if model_config.min_recent_messages is not None
+        else runtime.context.num_limit_min_recent_messages,
     )
     try:
         response = cast("AIMessage", await model.ainvoke(model_messages))
     except Exception as error:
         if is_media_not_supported_error(error):
             response = AIMessage(content="Sorry, the model do not have image capability.")
+        elif is_tool_choice_not_supported_error(error):
+            response = cast("AIMessage", await fallback_model.ainvoke(model_messages))
         else:
             raise
 
     if state.is_last_step and response.tool_calls:
-        return {
-            "messages": [
-                AIMessage(
-                    id=response.id,
-                    content="Sorry, I could not find an answer to your question in the specified number of steps.",
-                )
-            ]
-        }
+        final_response = AIMessage(
+            id=response.id,
+            content="Sorry, I could not find an answer to your question in the specified number of steps.",
+        )
+        return {"messages": build_reasoning_storage_update(state.messages, final_response)}
 
-    return {"messages": [response]}
+    return {"messages": build_reasoning_storage_update(state.messages, response)}
 
 
 def route_model_output(state: State) -> Literal["__end__", "tools"]:

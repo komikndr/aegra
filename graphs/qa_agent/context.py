@@ -9,6 +9,8 @@ from qa_agent import prompts
 
 @dataclass(kw_only=True)
 class ChatContext(KmsContext):
+    agent_id: str = field(default="qa_chat", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.CHAT_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the QA chat interface."},

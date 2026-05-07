@@ -45,6 +45,8 @@ class Context(BaseContext):
 
 @dataclass(kw_only=True)
 class ChatContext(Context):
+    agent_id: str = field(default="analytic_chat", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.CHAT_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the analytic chat interface."},
@@ -53,6 +55,8 @@ class ChatContext(Context):
 
 @dataclass(kw_only=True)
 class ExecutiveContext(Context):
+    agent_id: str = field(default="analytic_executive", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.EXECUTIVE_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the analytic executive interface."},
@@ -61,6 +65,8 @@ class ExecutiveContext(Context):
 
 @dataclass(kw_only=True)
 class OfficeContext(Context):
+    agent_id: str = field(default="analytic_office", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.OFFICE_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the analytic docs builder interface."},
@@ -69,6 +75,8 @@ class OfficeContext(Context):
 
 @dataclass(kw_only=True)
 class ArtifactEditorContext(Context):
+    agent_id: str = field(default="analytic_artifact_editor", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.ARTIFACT_EDITOR_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the analytic artifact editor interface."},

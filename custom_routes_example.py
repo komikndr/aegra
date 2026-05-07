@@ -48,9 +48,10 @@ _GRAPHS_DIR = Path(__file__).resolve().parent / "graphs"
 if _GRAPHS_DIR.exists() and str(_GRAPHS_DIR) not in sys.path:
     sys.path.insert(0, str(_GRAPHS_DIR))
 
-from fastapi import Depends, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
+from react_agent.model_config import resolve_agent_model
 from react_agent.utils import (
     get_active_model_name,
     get_message_text,
@@ -219,20 +220,36 @@ async def protected_endpoint(user: User = Depends(require_auth)):
 
 
 @app.get("/custom/model-info")
-async def model_info(user: User = Depends(require_auth)):
+async def model_info(agent_id: str | None = Query(default=None, alias="agentId"), user: User = Depends(require_auth)):
     """Return configured and resolved active model info for the UI."""
-    configured_model = _get_configured_model()
-    resolved_provider, resolved_model = resolve_model_name(configured_model)
+    model_config = resolve_agent_model(agent_id, context_model=_get_configured_model())
+    resolved_provider, resolved_model = resolve_model_name(
+        model_config.model,
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+    )
+    resolved_base_url = (
+        model_config.base_url
+        or os.environ.get("VLLM_BASE_URL", "").strip()
+        or os.environ.get("OPENAI_BASE_URL", "").strip()
+        or None
+    )
     return {
         "user": user.identity,
-        "configured_model": configured_model,
+        "agent_id": agent_id,
+        "configured_model": model_config.model,
         "active_model": f"{resolved_provider}/{resolved_model}",
         "active_model_name": resolved_model,
         "display_model_name": resolved_model,
         "provider": resolved_provider,
+        "base_url": resolved_base_url,
         "vllm_base_url": os.environ.get("VLLM_BASE_URL", "").strip() or None,
         "openai_base_url": os.environ.get("OPENAI_BASE_URL", "").strip() or None,
-        "endpoint_active_model": get_active_model_name(),
+        "endpoint_active_model": get_active_model_name(base_url=model_config.base_url, api_key=model_config.api_key),
+        "context_window": model_config.context_window,
+        "response_reserve": model_config.response_reserve,
+        "safety_buffer": model_config.safety_buffer,
+        "min_recent_messages": model_config.min_recent_messages,
     }
 
 

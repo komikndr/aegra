@@ -9,6 +9,8 @@ from casual_agent import prompts
 
 @dataclass(kw_only=True)
 class ChatContext(BaseContext):
+    agent_id: str = field(default="casual_chat", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.CHAT_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the casual chat interface."},
@@ -17,6 +19,8 @@ class ChatContext(BaseContext):
 
 @dataclass(kw_only=True)
 class ExecutiveContext(BaseContext):
+    agent_id: str = field(default="casual_executive", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.EXECUTIVE_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the casual executive interface."},
@@ -25,6 +29,8 @@ class ExecutiveContext(BaseContext):
 
 @dataclass(kw_only=True)
 class OfficeContext(BaseContext):
+    agent_id: str = field(default="casual_office", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.OFFICE_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the casual docs builder interface."},
@@ -33,6 +39,8 @@ class OfficeContext(BaseContext):
 
 @dataclass(kw_only=True)
 class ArtifactEditorContext(BaseContext):
+    agent_id: str = field(default="casual_artifact_editor", metadata={"description": "Agent model routing ID."})
+
     system_prompt: str = field(
         default=prompts.ARTIFACT_EDITOR_SYSTEM_PROMPT,
         metadata={"description": "System prompt for the casual artifact editor interface."},

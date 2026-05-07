@@ -1,0 +1,32 @@
+{
+  "default": {
+    "model": "openai/Qwen3.6-35B",
+    "base_url": "${OPENAI_BASE_URL}",
+    "context_window": 65536,
+    "response_reserve": 4096,
+    "safety_buffer": 1024,
+    "min_recent_messages": 6
+  },
+  "agents": {
+    "qa_chat": {
+      "model": "openai/gemma4-e2b",
+      "base_url": "http://ray-serve:8000/v1",
+      "context_window": 8192
+    },
+    "casual_chat": {
+      "model": "openai/Qwen9B",
+      "base_url": "http://ray-serve:8000/v1",
+      "context_window": 32768
+    },
+    "kms_chat": {
+      "model": "openai/Qwen14B",
+      "base_url": "http://ray-serve:8000/v1",
+      "context_window": 65536
+    },
+    "analytic_chat": {
+      "model": "openai/Qwen32B",
+      "base_url": "http://ray-serve:8000/v1",
+      "context_window": 131072
+    }
+  }
+}
