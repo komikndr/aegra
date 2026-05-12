@@ -4,8 +4,12 @@ Contains the shared run-creation helper, thread metadata updates,
 resume-command validation, and config/context merging logic.
 """
 
+import os
+import sys
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 import structlog
@@ -27,6 +31,71 @@ from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
+
+
+def _ensure_graphs_import_path() -> None:
+    for path in (Path("/app/graphs"), Path.cwd() / "graphs"):
+        try:
+            resolved = path.resolve()
+        except OSError:
+            continue
+        if resolved.exists() and str(resolved) not in sys.path:
+            sys.path.insert(0, str(resolved))
+
+
+def _is_custom_openai_base_url(base_url: str | None) -> bool:
+    if not base_url:
+        return False
+    parsed = urlparse(base_url.strip())
+    return parsed.netloc.lower() != "api.openai.com"
+
+
+def _model_endpoint_base_url(model_config: Any) -> str | None:
+    base_url = getattr(model_config, "base_url", None)
+    if isinstance(base_url, str) and base_url.strip():
+        return base_url.strip()
+
+    # load_chat_model falls back to OPENAI_BASE_URL for openai/* models and
+    # VLLM_BASE_URL/OPENAI_BASE_URL for vllm/* models. Match that here so a
+    # powered-off local GPU is rejected before we persist a run.
+    for name in ("VLLM_BASE_URL", "OPENAI_BASE_URL"):
+        value = os.environ.get(name)
+        if value and value.strip():
+            return value.strip()
+    return None
+
+
+def _preflight_model_endpoint(agent_id: str, context_model: str | None = None) -> None:
+    """Fail fast when a local OpenAI-compatible model endpoint is unavailable.
+
+    This intentionally runs before the RunORM row is created. If sysadmins power
+    off the GPU, the API returns 503 and the frontend can roll back its optimistic
+    message instead of leaving an unprocessed prompt in thread history.
+    """
+    _ensure_graphs_import_path()
+    try:
+        from react_agent.model_config import resolve_agent_model
+        from react_agent.utils import get_active_model_name
+    except Exception:
+        # Not every Aegra deployment uses the bundled react_agent helpers.
+        return
+
+    model_config = resolve_agent_model(agent_id, context_model=context_model)
+    base_url = _model_endpoint_base_url(model_config)
+    if not _is_custom_openai_base_url(base_url):
+        return
+
+    active_model = get_active_model_name(base_url=base_url, api_key=getattr(model_config, "api_key", None))
+    if active_model:
+        return
+
+    logger.warning(
+        "Model endpoint unavailable before run creation",
+        graph_id=agent_id,
+        model=getattr(model_config, "model", None),
+        base_url=base_url,
+    )
+    raise HTTPException(status_code=503, detail="Model endpoint is unavailable. Your message was not sent.")
 
 
 async def _validate_resume_command(session: AsyncSession, thread_id: str, command: dict[str, Any] | None) -> None:
@@ -215,6 +284,9 @@ async def _prepare_run(
     available_graphs = langgraph_service.list_graphs()
     if assistant.graph_id not in available_graphs:
         raise HTTPException(404, f"Graph '{assistant.graph_id}' not found for assistant")
+
+    configured_model = context.get("model") if isinstance(context.get("model"), str) else None
+    _preflight_model_endpoint(assistant.graph_id, context_model=configured_model)
 
     # Mark thread as busy and update metadata
     await update_thread_metadata(
