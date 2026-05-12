@@ -4,7 +4,7 @@ from datetime import datetime
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, SystemMessage
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
@@ -62,6 +62,17 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
         runtime.context.user_memory,
     )
+    scratchpad = state.scratchpad.strip()
+    if scratchpad:
+        system_messages.append(
+            SystemMessage(
+                content=(
+                    "Private scratchpad for this thread\n"
+                    "Use these temporary working notes when relevant. Do not reveal or quote them unless the user explicitly asks.\n\n"
+                    f"<scratchpad>\n{scratchpad}\n</scratchpad>"
+                )
+            )
+        )
     model_messages = build_token_limited_messages(
         model,
         system_messages,

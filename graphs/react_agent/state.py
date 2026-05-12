@@ -50,3 +50,9 @@ class State(InputState):
     This is a 'managed' variable, controlled by the state machine rather than user code.
     It is set to 'True' when the step count reaches recursion_limit - 1.
     """
+
+    scratchpad: str = field(default="")
+    """
+    Private per-thread working memory for agents to track temporary notes, partial findings,
+    open questions, and next steps without exposing them as final responses.
+    """
