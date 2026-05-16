@@ -191,6 +191,69 @@ class UserMemorySnapshot(Base):
     __table_args__ = (Index("idx_user_memory_snapshots_updated_at", "updated_at"),)
 
 
+class PipelineWorkflow(Base):
+    __tablename__ = "pipeline_workflows"
+
+    workflow_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    graph: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index("idx_pipeline_workflows_user", "user_id"),
+        Index("idx_pipeline_workflows_user_name", "user_id", "name", unique=True),
+    )
+
+
+class PipelineApiKey(Base):
+    __tablename__ = "pipeline_api_keys"
+
+    key_id: Mapped[str] = mapped_column(
+        Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text")
+    )
+    workflow_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("pipeline_workflows.workflow_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    key_hash: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    last_used_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
+
+    __table_args__ = (
+        Index("idx_pipeline_api_keys_workflow", "workflow_id"),
+        Index("idx_pipeline_api_keys_user", "user_id"),
+        Index("idx_pipeline_api_keys_hash", "key_hash", unique=True),
+    )
+
+
+class PipelineRun(Base):
+    __tablename__ = "pipeline_runs"
+
+    run_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text"))
+    workflow_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("pipeline_workflows.workflow_id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'completed'"))
+    input: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    output: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+    updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
+
+    __table_args__ = (
+        Index("idx_pipeline_runs_workflow", "workflow_id"),
+        Index("idx_pipeline_runs_user", "user_id"),
+        Index("idx_pipeline_runs_created_at", "created_at"),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Session factory
 # ---------------------------------------------------------------------------

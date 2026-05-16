@@ -35,12 +35,19 @@ You can also configure CORS:
 
 # ruff: noqa: E402
 
+import asyncio
 import base64
+import csv
+import hashlib
+import io
 import json
 import logging
 import os
+import secrets
 import sys
-from datetime import datetime
+import urllib.request
+import uuid
+from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -52,13 +59,14 @@ if _GRAPHS_DIR.exists() and str(_GRAPHS_DIR) not in sys.path:
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from langchain_community.vectorstores import OpenSearchVectorSearch
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import OpenAIEmbeddings
 from opensearchpy import OpenSearch as OpenSearchClient
 from opensearchpy import TransportError
 from pydantic import BaseModel, Field
 from react_agent.model_config import resolve_agent_model
 from react_agent.utils import (
+    apply_reasoning_effort,
     get_active_model_name,
     get_message_text,
     is_media_not_supported_error,
@@ -70,7 +78,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.agent_access import ensure_graph_access
 from aegra_api.core.auth_deps import require_auth
-from aegra_api.core.orm import ExecutiveArtifact, Thread, get_session
+from aegra_api.core.orm import ExecutiveArtifact, PipelineApiKey, PipelineRun, PipelineWorkflow, Thread, get_session
 from aegra_api.models.auth import User
 
 # Create your FastAPI app instance
@@ -100,6 +108,53 @@ class ExecutiveArtifactPayload(BaseModel):
 class ReplaceExecutiveArtifactsRequest(BaseModel):
     artifacts: list[ExecutiveArtifactPayload] = Field(default_factory=list)
     artifactsBase64: str | None = None
+
+
+class PipelineNodePayload(BaseModel):
+    id: str
+    type: str
+    label: str
+    position: dict[str, float] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+
+
+class PipelineEdgePayload(BaseModel):
+    id: str
+    source: str
+    target: str
+    label: str | None = None
+
+
+class PipelineBlueprintPayload(BaseModel):
+    workflowId: str
+    description: str
+    nodes: list[PipelineNodePayload]
+    edges: list[PipelineEdgePayload]
+
+
+class PipelineWorkflowRequest(BaseModel):
+    workflowId: str | None = None
+    name: str
+    description: str = ""
+    graph: PipelineBlueprintPayload
+
+
+class PipelineWorkflowUpdateRequest(BaseModel):
+    name: str | None = None
+    description: str | None = None
+    graph: PipelineBlueprintPayload | None = None
+
+
+class PipelineApiKeyRequest(BaseModel):
+    name: str = "External push key"
+    expiresAt: datetime | None = None
+
+
+class PipelineExecuteRequest(BaseModel):
+    workflowId: str
+    data: Any = None
+    rows: list[Any] | None = None
+    dryRun: bool = False
 
 
 def _normalize_base64(encoded_value: str) -> str:
@@ -155,6 +210,395 @@ def _decode_transport_json(encoded_value: str | None, field_name: str) -> list[d
 
 def _get_configured_model() -> str:
     return os.environ.get("MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
+
+
+PIPELINE_KEY_PREFIX = "aegra_pipeline_"
+
+
+def _slugify_workflow_id(value: str) -> str:
+    cleaned = "".join(char.lower() if char.isalnum() else "-" for char in value.strip())
+    cleaned = "-".join(part for part in cleaned.split("-") if part)
+    return cleaned[:64] or f"workflow-{uuid.uuid4().hex[:8]}"
+
+
+def _hash_pipeline_key(raw_key: str) -> str:
+    return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
+
+
+def _resolve_pipeline_base_url(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    resolved = os.path.expandvars(value).strip()
+    if "$" in resolved:
+        return None
+    return resolved or None
+
+
+def _default_pipeline_blueprint(workflow_id: str) -> PipelineBlueprintPayload:
+    return PipelineBlueprintPayload(
+        workflowId=workflow_id,
+        description=(
+            "HTTP push workflow. External systems POST rows to /pipeline with workflowId, "
+            "processors transform each row, then output nodes return the result."
+        ),
+        nodes=[
+            PipelineNodePayload(
+                id="source-1",
+                type="source",
+                label="Source",
+                position={"x": 80, "y": 180},
+                config={
+                    "method": "POST",
+                    "path": "/pipeline",
+                    "workflowId": workflow_id,
+                    "auth": "Bearer API key",
+                    "description": "Accepts a pushed JSON row or rows array.",
+                },
+            ),
+            PipelineNodePayload(
+                id="formatter-1",
+                type="formatter",
+                label="JSON Formatter",
+                position={"x": 390, "y": 90},
+                config={
+                    "model": _get_configured_model(),
+                    "systemMessage": "Normalize each inbound row into a clean JSON object suitable for downstream analytics.",
+                    "structuredOutput": {
+                        "name": "normalized_row",
+                        "strict": True,
+                        "schema": {
+                            "type": "object",
+                            "properties": {},
+                            "required": [],
+                            "additionalProperties": True,
+                        },
+                    },
+                },
+            ),
+            PipelineNodePayload(
+                id="output-1",
+                type="output",
+                label="Output",
+                position={"x": 720, "y": 180},
+                config={"description": "Returns processed rows in the pipeline response."},
+            ),
+        ],
+        edges=[
+            PipelineEdgePayload(id="source-1-to-formatter-1", source="source-1", target="formatter-1", label="rows"),
+            PipelineEdgePayload(id="formatter-1-to-output-1", source="formatter-1", target="output-1", label="json"),
+        ],
+    )
+
+
+def _serialize_workflow(workflow: PipelineWorkflow) -> dict[str, Any]:
+    return {
+        "workflowId": workflow.workflow_id,
+        "name": workflow.name,
+        "description": workflow.description,
+        "graph": workflow.graph,
+        "createdAt": workflow.created_at.isoformat() if workflow.created_at else None,
+        "updatedAt": workflow.updated_at.isoformat() if workflow.updated_at else None,
+    }
+
+
+def _serialize_api_key(api_key: PipelineApiKey) -> dict[str, Any]:
+    return {
+        "keyId": api_key.key_id,
+        "workflowId": api_key.workflow_id,
+        "name": api_key.name,
+        "createdAt": api_key.created_at.isoformat() if api_key.created_at else None,
+        "lastUsedAt": api_key.last_used_at.isoformat() if api_key.last_used_at else None,
+        "revokedAt": api_key.revoked_at.isoformat() if api_key.revoked_at else None,
+        "expiresAt": api_key.expires_at.isoformat() if api_key.expires_at else None,
+    }
+
+
+def _validate_pipeline_graph(graph: PipelineBlueprintPayload) -> None:
+    node_ids = [node.id for node in graph.nodes]
+    if len(node_ids) != len(set(node_ids)):
+        raise HTTPException(status_code=422, detail="Workflow node ids must be unique")
+    if not any(node.type == "source" for node in graph.nodes):
+        raise HTTPException(status_code=422, detail="Workflow requires a source node")
+    known = set(node_ids)
+    for edge in graph.edges:
+        if edge.source not in known or edge.target not in known:
+            raise HTTPException(status_code=422, detail=f"Invalid edge {edge.id}")
+
+
+def _pipeline_rows(request: PipelineExecuteRequest) -> list[Any]:
+    if request.rows is not None:
+        return request.rows
+    if isinstance(request.data, list):
+        return request.data
+    return [request.data if request.data is not None else {}]
+
+
+def _parse_model_json(text: str) -> Any:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.strip("`").removeprefix("json").strip()
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        return {"text": text}
+
+
+async def _run_pipeline_processor(row: Any, node: PipelineNodePayload) -> Any:
+    return await _run_pipeline_formatter(row, node)
+
+
+def _structured_schema(config: dict[str, Any]) -> dict[str, Any]:
+    structured = config.get("structuredOutput")
+    if isinstance(structured, dict) and isinstance(structured.get("schema"), dict):
+        return structured["schema"]
+    schema = config.get("jsonSchema")
+    return schema if isinstance(schema, dict) else {"type": "object"}
+
+
+def _validate_schema_value(value: Any, schema: dict[str, Any], path: str = "output") -> None:
+    expected_type = schema.get("type")
+    if expected_type == "object":
+        if not isinstance(value, dict):
+            raise ValueError(f"{path} must be an object")
+        required = schema.get("required") if isinstance(schema.get("required"), list) else []
+        for key in required:
+            if isinstance(key, str) and key not in value:
+                raise ValueError(f"{path}.{key} is required")
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        if schema.get("additionalProperties") is False:
+            extra = set(value) - set(properties)
+            if extra:
+                raise ValueError(f"{path} has unexpected keys: {', '.join(sorted(extra))}")
+        for key, child_schema in properties.items():
+            if key in value and isinstance(child_schema, dict):
+                _validate_schema_value(value[key], child_schema, f"{path}.{key}")
+    elif expected_type == "array":
+        if not isinstance(value, list):
+            raise ValueError(f"{path} must be an array")
+        item_schema = schema.get("items") if isinstance(schema.get("items"), dict) else None
+        if item_schema:
+            for index, item in enumerate(value):
+                _validate_schema_value(item, item_schema, f"{path}[{index}]")
+    elif expected_type == "string" and not isinstance(value, str):
+        raise ValueError(f"{path} must be a string")
+    elif expected_type == "number" and not isinstance(value, (int, float)):
+        raise ValueError(f"{path} must be a number")
+    elif expected_type == "integer" and not isinstance(value, int):
+        raise ValueError(f"{path} must be an integer")
+    elif expected_type == "boolean" and not isinstance(value, bool):
+        raise ValueError(f"{path} must be a boolean")
+
+
+def _csv_from_value(value: Any, config: dict[str, Any]) -> str:
+    separator = config.get("separator") if isinstance(config.get("separator"), str) else ","
+    delimiter = separator[:1] or ","
+    include_header = bool(config.get("includeHeader", True))
+    columns = config.get("columns") if isinstance(config.get("columns"), list) else []
+    rows = value if isinstance(value, list) else [value]
+    dict_rows = [row if isinstance(row, dict) else {"value": row} for row in rows]
+    fieldnames = [column for column in columns if isinstance(column, str) and column]
+    if not fieldnames:
+        fieldnames = list(dict.fromkeys(key for row in dict_rows for key in row)) or ["value"]
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=fieldnames, delimiter=delimiter, extrasaction="ignore")
+    if include_header:
+        writer.writeheader()
+    writer.writerows(dict_rows)
+    return output.getvalue().strip("\r\n")
+
+
+async def _run_pipeline_formatter(row: Any, node: PipelineNodePayload) -> Any:
+    config = node.config
+    selected_model = config.get("model") if isinstance(config.get("model"), str) else _get_configured_model()
+    base_url = _resolve_pipeline_base_url(config.get("baseUrl"))
+    model = load_chat_model(selected_model, base_url=base_url)
+    model = apply_reasoning_effort(model, selected_model, "none", base_url=base_url)
+    schema = _structured_schema(config)
+    structured = config.get("structuredOutput") if isinstance(config.get("structuredOutput"), dict) else {}
+    strict = bool(structured.get("strict", True))
+    system_message = config.get("systemMessage") if isinstance(config.get("systemMessage"), str) else "Process one JSON row."
+    prompt = (
+        f"{system_message}\n\n"
+        "Return only valid JSON. Do not include prose or markdown fences.\n"
+        f"Structured output schema:\n{json.dumps(schema, ensure_ascii=False)}"
+    )
+    response = await model.ainvoke(
+        [
+            SystemMessage(content=prompt),
+            HumanMessage(content=json.dumps(row, ensure_ascii=False, default=str)),
+        ]
+    )
+    parsed = _parse_model_json(get_message_text(response))
+    if strict:
+        try:
+            _validate_schema_value(parsed, schema)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=f"{node.label} output failed schema validation: {exc}") from exc
+    if node.type == "csv_formatter":
+        return _csv_from_value(parsed, config)
+    return parsed
+
+
+async def _post_pipeline_egress(url: str, payload: Any, *, method: str = "POST", headers: dict[str, str] | None = None) -> dict[str, Any]:
+    body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
+    request_headers = {"Content-Type": "application/json", "Accept": "application/json", **(headers or {})}
+
+    def send() -> dict[str, Any]:
+        request = urllib.request.Request(  # nosec B310 - user-configured pipeline sink
+            url,
+            data=body,
+            method=method.upper(),
+            headers=request_headers,
+        )
+        with urllib.request.urlopen(request, timeout=15) as response:  # nosec B310 - user-configured pipeline sink
+            response_body = response.read().decode("utf-8")
+            return {"status": response.status, "body": response_body[:2000]}
+
+    return await asyncio.to_thread(send)
+
+
+def _topological_pipeline_nodes(graph: PipelineBlueprintPayload) -> list[PipelineNodePayload]:
+    nodes_by_id = {node.id: node for node in graph.nodes}
+    indegree = {node.id: 0 for node in graph.nodes}
+    outgoing: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
+    for edge in graph.edges:
+        outgoing.setdefault(edge.source, []).append(edge.target)
+        indegree[edge.target] = indegree.get(edge.target, 0) + 1
+    queue = [node.id for node in graph.nodes if indegree.get(node.id, 0) == 0]
+    ordered: list[PipelineNodePayload] = []
+    while queue:
+        node_id = queue.pop(0)
+        ordered.append(nodes_by_id[node_id])
+        for target in outgoing.get(node_id, []):
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+    if len(ordered) != len(graph.nodes):
+        raise HTTPException(status_code=422, detail="Workflow graph cannot contain cycles")
+    return ordered
+
+
+async def _execute_pipeline_graph(rows: list[Any], graph: PipelineBlueprintPayload, dry_run: bool) -> dict[str, Any]:
+    ordered = _topological_pipeline_nodes(graph)
+    incoming: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
+    for edge in graph.edges:
+        incoming.setdefault(edge.target, []).append(edge.source)
+
+    output_rows: list[Any] = []
+    sink_results: list[dict[str, Any]] = []
+    for source_row in rows:
+        node_values: dict[str, Any] = {}
+        for node in ordered:
+            parents = incoming.get(node.id, [])
+            if node.type == "source":
+                node_values[node.id] = source_row
+                continue
+            if len(parents) > 1 and node.type in {"formatter", "csv_formatter", "sink", "output"}:
+                node_input: Any = {parent: node_values.get(parent) for parent in parents}
+            elif parents:
+                node_input = node_values.get(parents[0])
+            else:
+                node_input = source_row
+
+            if node.type in {"formatter", "csv_formatter"}:
+                node_values[node.id] = node_input if dry_run else await _run_pipeline_formatter(node_input, node)
+            elif node.type == "sink":
+                node_values[node.id] = node_input
+                url = node.config.get("url") if isinstance(node.config.get("url"), str) else ""
+                enabled = bool(node.config.get("enabled", True))
+                if url and enabled and not dry_run:
+                    method = node.config.get("method") if isinstance(node.config.get("method"), str) else "POST"
+                    headers = node.config.get("headers") if isinstance(node.config.get("headers"), dict) else {}
+                    safe_headers = {str(key): str(value) for key, value in headers.items()}
+                    sink_results.append({"nodeId": node.id, **await _post_pipeline_egress(url, node_input, method=method, headers=safe_headers)})
+            elif node.type == "output":
+                node_values[node.id] = node_input
+            else:
+                node_values[node.id] = node_input
+
+        outputs = [node_values[node.id] for node in graph.nodes if node.type == "output" and node.id in node_values]
+        output_rows.append(outputs[0] if len(outputs) == 1 else outputs if outputs else node_values.get(ordered[-1].id, source_row))
+    return {"processed": output_rows, "sinks": sink_results}
+
+
+def _load_pipeline_model_choices() -> list[dict[str, Any]]:
+    choices: list[dict[str, Any]] = [{"id": _get_configured_model(), "label": "Default", "model": _get_configured_model()}]
+    path = Path(os.environ.get("AGENT_MODELS_CONFIG", "agent-models.json"))
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        parsed = {}
+    if isinstance(parsed, dict):
+        entries: list[tuple[str, dict[str, Any]]] = []
+        default = parsed.get("default")
+        if isinstance(default, dict):
+            entries.append(("Configured default", default))
+        agents = parsed.get("agents")
+        if isinstance(agents, dict):
+            entries.extend((str(name), value) for name, value in agents.items() if isinstance(value, dict))
+        for label, entry in entries:
+            model = entry.get("model")
+            if isinstance(model, str) and model:
+                base_url = _resolve_pipeline_base_url(entry.get("base_url"))
+                choices.append({"id": f"{label}:{model}", "label": label, "model": model, "baseUrl": base_url})
+    deduped: dict[tuple[str, str | None], dict[str, Any]] = {}
+    for choice in choices:
+        key = (str(choice.get("model")), choice.get("baseUrl") if isinstance(choice.get("baseUrl"), str) else None)
+        deduped[key] = choice
+    return list(deduped.values())
+
+
+async def _get_user_workflow(session: AsyncSession, workflow_id: str, user_id: str) -> PipelineWorkflow:
+    workflow = await session.scalar(
+        select(PipelineWorkflow).where(
+            PipelineWorkflow.workflow_id == workflow_id,
+            PipelineWorkflow.user_id == user_id,
+        )
+    )
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found")
+    return workflow
+
+
+def _pipeline_key_from_request(request: Request) -> str | None:
+    explicit_key = request.headers.get("x-pipeline-key")
+    if explicit_key:
+        return explicit_key.strip()
+    authorization = request.headers.get("authorization", "")
+    if authorization.lower().startswith("bearer "):
+        token = authorization[7:].strip()
+        if token.startswith(PIPELINE_KEY_PREFIX):
+            return token
+    return None
+
+
+async def _resolve_pipeline_actor(
+    request: Request,
+    request_payload: PipelineExecuteRequest,
+    session: AsyncSession,
+) -> tuple[str, PipelineWorkflow]:
+    raw_key = _pipeline_key_from_request(request)
+    if raw_key:
+        api_key = await session.scalar(
+            select(PipelineApiKey).where(
+                PipelineApiKey.key_hash == _hash_pipeline_key(raw_key),
+                PipelineApiKey.workflow_id == request_payload.workflowId,
+                PipelineApiKey.revoked_at.is_(None),
+            )
+        )
+        if api_key is None:
+            raise HTTPException(status_code=401, detail="Invalid pipeline API key")
+        now = datetime.now(UTC)
+        expires_at = api_key.expires_at
+        if expires_at and expires_at.replace(tzinfo=expires_at.tzinfo or UTC) < now:
+            raise HTTPException(status_code=401, detail="Pipeline API key expired")
+        workflow = await _get_user_workflow(session, request_payload.workflowId, api_key.user_id)
+        api_key.last_used_at = now
+        return api_key.user_id, workflow
+
+    user = await require_auth(request)
+    workflow = await _get_user_workflow(session, request_payload.workflowId, user.identity)
+    return user.identity, workflow
 
 
 def _serialize_artifact(artifact: ExecutiveArtifact) -> dict[str, Any]:
@@ -257,6 +701,187 @@ async def model_info(agent_id: str | None = Query(default=None, alias="agentId")
         "safety_buffer": model_config.safety_buffer,
         "min_recent_messages": model_config.min_recent_messages,
     }
+
+
+@app.get("/pipeline/models")
+async def list_pipeline_models(user: User = Depends(require_auth)):
+    """Return model choices usable by side-chain pipeline formatter nodes."""
+    return {"models": _load_pipeline_model_choices(), "user": user.identity}
+
+
+@app.get("/pipeline/workflows")
+async def list_pipeline_workflows(
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    result = await session.scalars(
+        select(PipelineWorkflow)
+        .where(PipelineWorkflow.user_id == user.identity)
+        .order_by(PipelineWorkflow.updated_at.desc())
+    )
+    return {"workflows": [_serialize_workflow(workflow) for workflow in result.all()]}
+
+
+@app.post("/pipeline/workflows")
+async def create_pipeline_workflow(
+    payload: PipelineWorkflowRequest,
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    workflow_id = _slugify_workflow_id(payload.workflowId or payload.name)
+    existing = await session.scalar(select(PipelineWorkflow).where(PipelineWorkflow.workflow_id == workflow_id))
+    if existing is not None:
+        workflow_id = f"{workflow_id}-{uuid.uuid4().hex[:6]}"
+    graph = payload.graph.model_copy(update={"workflowId": workflow_id})
+    _validate_pipeline_graph(graph)
+    workflow = PipelineWorkflow(
+        workflow_id=workflow_id,
+        user_id=user.identity,
+        name=payload.name,
+        description=payload.description,
+        graph=graph.model_dump(),
+    )
+    session.add(workflow)
+    await session.commit()
+    await session.refresh(workflow)
+    return {"workflow": _serialize_workflow(workflow)}
+
+
+@app.get("/pipeline/workflows/{workflow_id}")
+async def get_pipeline_workflow(
+    workflow_id: str,
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    workflow = await _get_user_workflow(session, workflow_id, user.identity)
+    return {"workflow": _serialize_workflow(workflow)}
+
+
+@app.put("/pipeline/workflows/{workflow_id}")
+async def update_pipeline_workflow(
+    workflow_id: str,
+    payload: PipelineWorkflowUpdateRequest,
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    workflow = await _get_user_workflow(session, workflow_id, user.identity)
+    if payload.name is not None:
+        workflow.name = payload.name
+    if payload.description is not None:
+        workflow.description = payload.description
+    if payload.graph is not None:
+        graph = payload.graph.model_copy(update={"workflowId": workflow_id})
+        _validate_pipeline_graph(graph)
+        workflow.graph = graph.model_dump()
+    workflow.updated_at = datetime.now(UTC)
+    await session.commit()
+    await session.refresh(workflow)
+    return {"workflow": _serialize_workflow(workflow)}
+
+
+@app.delete("/pipeline/workflows/{workflow_id}")
+async def delete_pipeline_workflow(
+    workflow_id: str,
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    workflow = await _get_user_workflow(session, workflow_id, user.identity)
+    await session.delete(workflow)
+    await session.commit()
+    return {"ok": True, "workflowId": workflow_id}
+
+
+@app.get("/pipeline/workflows/{workflow_id}/keys")
+async def list_pipeline_api_keys(
+    workflow_id: str,
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    await _get_user_workflow(session, workflow_id, user.identity)
+    result = await session.scalars(
+        select(PipelineApiKey)
+        .where(PipelineApiKey.workflow_id == workflow_id, PipelineApiKey.user_id == user.identity)
+        .order_by(PipelineApiKey.created_at.desc())
+    )
+    return {"keys": [_serialize_api_key(api_key) for api_key in result.all()]}
+
+
+@app.post("/pipeline/workflows/{workflow_id}/keys")
+async def create_pipeline_api_key(
+    workflow_id: str,
+    payload: PipelineApiKeyRequest,
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    await _get_user_workflow(session, workflow_id, user.identity)
+    raw_key = f"{PIPELINE_KEY_PREFIX}{secrets.token_urlsafe(32)}"
+    api_key = PipelineApiKey(
+        workflow_id=workflow_id,
+        user_id=user.identity,
+        name=payload.name,
+        key_hash=_hash_pipeline_key(raw_key),
+        expires_at=payload.expiresAt,
+    )
+    session.add(api_key)
+    await session.commit()
+    await session.refresh(api_key)
+    return {"key": _serialize_api_key(api_key), "secret": raw_key}
+
+
+@app.delete("/pipeline/workflows/{workflow_id}/keys/{key_id}")
+async def revoke_pipeline_api_key(
+    workflow_id: str,
+    key_id: str,
+    user: User = Depends(require_auth),
+    session: AsyncSession = Depends(get_session),
+):
+    await _get_user_workflow(session, workflow_id, user.identity)
+    api_key = await session.scalar(
+        select(PipelineApiKey).where(
+            PipelineApiKey.key_id == key_id,
+            PipelineApiKey.workflow_id == workflow_id,
+            PipelineApiKey.user_id == user.identity,
+        )
+    )
+    if api_key is None:
+        raise HTTPException(status_code=404, detail="API key not found")
+    api_key.revoked_at = datetime.now(UTC)
+    await session.commit()
+    return {"ok": True, "keyId": key_id}
+
+
+@app.post("/pipeline")
+async def execute_pipeline(
+    request_payload: PipelineExecuteRequest,
+    request: Request,
+    session: AsyncSession = Depends(get_session),
+):
+    """Accept pushed JSON, run a persisted workflow, then return or sink the result."""
+    user_id, workflow = await _resolve_pipeline_actor(request, request_payload, session)
+    graph = PipelineBlueprintPayload.model_validate(workflow.graph)
+    _validate_pipeline_graph(graph)
+    rows = _pipeline_rows(request_payload)
+    output = await _execute_pipeline_graph(rows, graph, request_payload.dryRun)
+    result: dict[str, Any] = {
+        "ok": True,
+        "workflowId": workflow.workflow_id,
+        "user": user_id,
+        "dryRun": request_payload.dryRun,
+        "processed": output["processed"],
+        "rowCount": len(output["processed"]),
+        "sinks": output["sinks"],
+    }
+    session.add(
+        PipelineRun(
+            workflow_id=workflow.workflow_id,
+            user_id=user_id,
+            status="completed",
+            input=request_payload.model_dump(),
+            output=result,
+        )
+    )
+    await session.commit()
+    return result
 
 
 @app.post("/custom/analyze-images")
