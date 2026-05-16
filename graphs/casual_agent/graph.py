@@ -1,10 +1,11 @@
 """Graph definitions for the casual agent."""
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
@@ -17,21 +18,64 @@ from react_agent.utils import (
     build_reasoning_storage_update,
     build_system_prompt_messages,
     build_token_limited_messages,
+    get_message_text,
     is_media_not_supported_error,
     is_tool_choice_not_supported_error,
     is_vllm_base_url,
     load_chat_model,
 )
 
-from casual_agent.context import (
-    ArtifactEditorContext,
-    ChatContext,
-    ExecutiveContext,
-    OfficeContext,
-)
+from casual_agent.context import ArtifactEditorContext, ChatContext, ExecutiveContext, OfficeContext
+
+_EMPTY_ASSISTANT_STATUS_MESSAGES = {
+    "the agent is synthesizing an answer for you.",
+    "agent synthesizing for you.",
+}
 
 
-async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, list[AIMessage]]:
+def _sanitize_message_for_model(message: BaseMessage) -> BaseMessage | None:
+    if isinstance(message, ToolMessage):
+        return message
+
+    if not isinstance(message, AIMessage):
+        return message
+
+    content = get_message_text(message).strip()
+    if not content and not message.tool_calls:
+        return None
+    if content.lower() in _EMPTY_ASSISTANT_STATUS_MESSAGES and not message.tool_calls:
+        return None
+    additional_kwargs = dict(message.additional_kwargs)
+    response_metadata = dict(message.response_metadata)
+    changed = False
+    for key in ("reasoning", "reasoning_content", "thinking"):
+        if key in additional_kwargs:
+            additional_kwargs.pop(key, None)
+            changed = True
+        if key in response_metadata:
+            response_metadata.pop(key, None)
+            changed = True
+
+    if not changed:
+        return message
+    return message.model_copy(
+        update={
+            "additional_kwargs": additional_kwargs,
+            "response_metadata": response_metadata,
+        }
+    )
+
+
+def _sanitize_messages_for_model(messages: Sequence[BaseMessage]) -> list[BaseMessage]:
+    sanitized: list[BaseMessage] = []
+    for message in messages:
+        next_message = _sanitize_message_for_model(message)
+        if next_message is not None:
+            sanitized.append(next_message)
+    return sanitized
+
+
+async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, object]:
     model_config = resolve_agent_model(
         runtime.context.agent_id,
         context_model=runtime.context.model,
@@ -62,21 +106,10 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
         runtime.context.user_memory,
     )
-    scratchpad = state.scratchpad.strip()
-    if scratchpad:
-        system_messages.append(
-            SystemMessage(
-                content=(
-                    "Private scratchpad for this thread\n"
-                    "Use these temporary working notes when relevant. Do not reveal or quote them unless the user explicitly asks.\n\n"
-                    f"<scratchpad>\n{scratchpad}\n</scratchpad>"
-                )
-            )
-        )
     model_messages = build_token_limited_messages(
         model,
         system_messages,
-        state.messages,
+        _sanitize_messages_for_model(state.messages),
         num_limit_token=model_config.context_window
         if model_config.context_window is not None
         else runtime.context.num_limit_token,

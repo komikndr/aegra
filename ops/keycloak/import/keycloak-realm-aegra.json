@@ -74,10 +74,12 @@
       "implicitFlowEnabled": false,
       "redirectUris": [
         "http://localhost:3000/api/auth/callback/keycloak",
+        "http://localhost:3001/api/auth/callback/keycloak",
         "http://10.10.5.190:3000/api/auth/callback/keycloak"
       ],
       "webOrigins": [
         "http://localhost:3000",
+        "http://localhost:3001",
         "http://10.10.5.190:3000"
       ],
       "protocolMappers": [

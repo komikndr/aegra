@@ -41,6 +41,7 @@ import logging
 import os
 import sys
 from datetime import datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -49,7 +50,12 @@ if _GRAPHS_DIR.exists() and str(_GRAPHS_DIR) not in sys.path:
     sys.path.insert(0, str(_GRAPHS_DIR))
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from langchain_community.vectorstores import OpenSearchVectorSearch
+from langchain_core.documents import Document
 from langchain_core.messages import HumanMessage
+from langchain_openai import OpenAIEmbeddings
+from opensearchpy import OpenSearch as OpenSearchClient
+from opensearchpy import TransportError
 from pydantic import BaseModel, Field
 from react_agent.model_config import resolve_agent_model
 from react_agent.utils import (
@@ -428,4 +434,425 @@ async def replace_executive_artifacts(
     return {
         "ok": True,
         "artifacts": [_serialize_artifact(artifact) for artifact in artifacts],
+    }
+
+
+# -- Articles / OpenSearch document ingestion endpoints --
+
+_ARTICLES_CONFIG_PATH = Path(__file__).resolve().parent / ".aegra-articles.json"
+
+
+def _read_bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+class ArticlesConfigRequest(BaseModel):
+    opensearch_url: str
+    opensearch_user: str
+    opensearch_password: str
+    embedding_model: str
+    use_ssl: bool = False
+    verify_certs: bool = True
+    ssl_assert_hostname: bool = True
+
+
+class ArticlesConfigResponse(BaseModel):
+    opensearch_url: str
+    opensearch_user: str
+    embedding_model: str
+    use_ssl: bool
+    verify_certs: bool
+    ssl_assert_hostname: bool
+
+
+class IngestDocumentRequest(BaseModel):
+    content: str
+    metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class IngestDocumentsRequest(BaseModel):
+    index: str
+    documents: list[IngestDocumentRequest]
+    force: bool = False
+
+
+def _load_articles_config() -> dict[str, Any] | None:
+    articles_url = os.environ.get("ARTICLES_OPENSEARCH_URL")
+    articles_user = os.environ.get("ARTICLES_OPENSEARCH_USER")
+    articles_password = os.environ.get("ARTICLES_OPENSEARCH_PASSWORD")
+    articles_model = os.environ.get("ARTICLES_EMBEDDING_MODEL")
+    if articles_url and articles_user and articles_password and articles_model:
+        return {
+            "opensearch_url": articles_url,
+            "opensearch_user": articles_user,
+            "opensearch_password": articles_password,
+            "embedding_model": articles_model,
+            "use_ssl": _read_bool_env("ARTICLES_OPENSEARCH_USE_SSL", False),
+            "verify_certs": _read_bool_env("ARTICLES_OPENSEARCH_VERIFY_CERTS", True),
+            "ssl_assert_hostname": _read_bool_env("ARTICLES_OPENSEARCH_SSL_ASSERT_HOSTNAME", True),
+        }
+
+    kms_host = os.environ.get("KMS_OPENSEARCH_HOST")
+    kms_user = os.environ.get("KMS_OPENSEARCH_USER")
+    kms_password = os.environ.get("KMS_OPENSEARCH_PASSWORD")
+    kms_model = os.environ.get("KMS_EMBEDDING_MODEL")
+    if kms_host and kms_user and kms_password and kms_model:
+        kms_port = os.environ.get("KMS_OPENSEARCH_PORT", "9200")
+        use_ssl = _read_bool_env("KMS_OPENSEARCH_USE_SSL", False)
+        scheme = "https" if use_ssl else "http"
+        return {
+            "opensearch_url": kms_host
+            if kms_host.startswith(("http://", "https://"))
+            else f"{scheme}://{kms_host}:{kms_port}",
+            "opensearch_user": kms_user,
+            "opensearch_password": kms_password,
+            "embedding_model": kms_model,
+            "use_ssl": use_ssl,
+            "verify_certs": _read_bool_env("KMS_OPENSEARCH_VERIFY_CERTS", True),
+            "ssl_assert_hostname": _read_bool_env("KMS_OPENSEARCH_SSL_ASSERT_HOSTNAME", True),
+        }
+
+    if not _ARTICLES_CONFIG_PATH.exists():
+        return None
+    try:
+        return json.loads(_ARTICLES_CONFIG_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+
+
+def _save_articles_config(data: dict[str, Any]) -> None:
+    _ARTICLES_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+
+@lru_cache(maxsize=8)
+def _get_articles_embeddings(model_name: str) -> OpenAIEmbeddings:
+    init_kwargs: dict[str, str] = {"model": model_name}
+    base_url = os.environ.get("EMBEDDING_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
+    if base_url:
+        init_kwargs["base_url"] = base_url
+    api_key = os.environ.get("EMBEDDING_API_KEY") or os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        init_kwargs["api_key"] = api_key
+    return OpenAIEmbeddings(**init_kwargs)
+
+
+def _opensearch_client(config: dict[str, Any]) -> OpenSearchClient:
+    return OpenSearchClient(
+        hosts=[config["opensearch_url"]],
+        http_auth=(config["opensearch_user"], config["opensearch_password"]),
+        use_ssl=config.get("use_ssl", False),
+        verify_certs=config.get("verify_certs", True),
+        ssl_assert_hostname=config.get("ssl_assert_hostname", True),
+    )
+
+
+def _vector_store_for_index(index_name: str, config: dict[str, Any]) -> OpenSearchVectorSearch:
+    return OpenSearchVectorSearch(
+        opensearch_url=config["opensearch_url"],
+        index_name=index_name,
+        embedding_function=_get_articles_embeddings(config["embedding_model"]),
+        http_auth=(config["opensearch_user"], config["opensearch_password"]),
+        use_ssl=config.get("use_ssl", False),
+        verify_certs=config.get("verify_certs", True),
+        ssl_assert_hostname=config.get("ssl_assert_hostname", True),
+    )
+
+
+def _articles_index_metadata(mapping: dict[str, Any], index_name: str) -> dict[str, Any]:
+    mappings = mapping.get(index_name, {}).get("mappings", {})
+    meta = mappings.get("_meta", {}).get("aegra_metadata", {})
+    if meta:
+        return meta
+
+    # Older local test mappings stored metadata under a field mapping.
+    props = mappings.get("properties", {})
+    field_meta = props.get("aegra_metadata", {})
+    if field_meta.get("value"):
+        return field_meta["value"]
+    return field_meta
+
+
+@app.get("/custom/articles/config")
+async def get_articles_config(user: User = Depends(require_auth)):
+    """Return the persisted articles OpenSearch connection config (without password)."""
+    data = _load_articles_config()
+    if not data:
+        raise HTTPException(status_code=404, detail="No articles config saved yet")
+    return ArticlesConfigResponse(
+        opensearch_url=data["opensearch_url"],
+        opensearch_user=data["opensearch_user"],
+        embedding_model=data["embedding_model"],
+        use_ssl=data.get("use_ssl", False),
+        verify_certs=data.get("verify_certs", True),
+        ssl_assert_hostname=data.get("ssl_assert_hostname", True),
+    ).model_dump()
+
+
+@app.post("/custom/articles/config")
+async def save_articles_config(
+    request: ArticlesConfigRequest,
+    user: User = Depends(require_auth),
+):
+    """Persist the articles OpenSearch connection config for future use."""
+    data = request.model_dump()
+    _save_articles_config(data)
+    logger.info(
+        "Articles config saved by user=%s url=%s model=%s",
+        user.identity,
+        request.opensearch_url,
+        request.embedding_model,
+    )
+    return ArticlesConfigResponse(
+        opensearch_url=data["opensearch_url"],
+        opensearch_user=data["opensearch_user"],
+        embedding_model=data["embedding_model"],
+        use_ssl=data.get("use_ssl", False),
+        verify_certs=data.get("verify_certs", True),
+        ssl_assert_hostname=data.get("ssl_assert_hostname", True),
+    ).model_dump()
+
+
+@app.get("/custom/articles/indexes")
+async def list_articles_indexes(user: User = Depends(require_auth)):
+    """List all OpenSearch indexes with document counts and embedding model metadata."""
+    config = _load_articles_config()
+    if not config:
+        raise HTTPException(status_code=400, detail="No articles config saved. POST /custom/articles/config first.")
+
+    client = _opensearch_client(config)
+    try:
+        all_indexes = client.indices.get_alias(index="*")
+    except TransportError as exc:
+        logger.error("Failed to list OpenSearch indexes: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
+        ) from exc
+
+    indexes = []
+    for index_name in sorted(all_indexes.keys()):
+        info: dict[str, Any] = {"name": index_name}
+        try:
+            stats = client.count(index=index_name)
+            info["documentCount"] = stats.get("count", 0)
+        except TransportError:
+            info["documentCount"] = 0
+
+        try:
+            mapping = client.indices.get_mapping(index=index_name)
+            info["embeddingModel"] = _articles_index_metadata(mapping, index_name).get("embedding_model")
+        except TransportError:
+            pass
+
+        indexes.append(info)
+
+    return {"indexes": indexes}
+
+
+@app.post("/custom/articles/indexes")
+async def create_articles_index(
+    index_name: str = Query(..., description="Name for the new index"),
+    user: User = Depends(require_auth),
+):
+    """Create a new OpenSearch index with embedding model metadata."""
+    config = _load_articles_config()
+    if not config:
+        raise HTTPException(status_code=400, detail="No articles config saved. POST /custom/articles/config first.")
+
+    client = _opensearch_client(config)
+
+    try:
+        if client.indices.exists(index=index_name):
+            raise HTTPException(status_code=409, detail=f"Index '{index_name}' already exists")
+    except TransportError as exc:
+        logger.error("Failed to check index existence: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
+        ) from exc
+
+    try:
+        client.indices.create(
+            index=index_name,
+            body={
+                "mappings": {
+                    "_meta": {
+                        "aegra_metadata": {
+                            "embedding_model": config["embedding_model"],
+                            "created_by": user.identity,
+                        }
+                    }
+                }
+            },
+        )
+    except TransportError as exc:
+        logger.error("Failed to create index %s: %s", index_name, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to create index: {exc.error or str(exc)}",
+        ) from exc
+
+    logger.info("Created articles index=%s by user=%s model=%s", index_name, user.identity, config["embedding_model"])
+    return {"ok": True, "index": index_name, "embeddingModel": config["embedding_model"]}
+
+
+@app.post("/custom/articles/ingest")
+async def ingest_articles(
+    request: IngestDocumentsRequest,
+    user: User = Depends(require_auth),
+):
+    """Ingest documents into an OpenSearch index with optional embedding model validation."""
+    config = _load_articles_config()
+    if not config:
+        raise HTTPException(status_code=400, detail="No articles config saved. POST /custom/articles/config first.")
+
+    if not request.documents:
+        raise HTTPException(status_code=400, detail="No documents provided")
+
+    client = _opensearch_client(config)
+
+    try:
+        if not client.indices.exists(index=request.index):
+            raise HTTPException(status_code=404, detail=f"Index '{request.index}' does not exist")
+    except TransportError as exc:
+        logger.error("Failed to check index existence: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
+        ) from exc
+
+    # Check embedding model mismatch
+    if not request.force:
+        try:
+            mapping = client.indices.get_mapping(index=request.index)
+            stored_model = _articles_index_metadata(mapping, request.index).get("embedding_model")
+            if stored_model and stored_model != config["embedding_model"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Embedding model mismatch: index uses '{stored_model}', "
+                        f"config has '{config['embedding_model']}'. "
+                        f"Set force=true to override."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except TransportError:
+            pass
+
+    try:
+        vector_store = _vector_store_for_index(request.index, config)
+        documents = [Document(page_content=doc.content, metadata=doc.metadata) for doc in request.documents]
+        vector_store.add_documents(documents)
+    except Exception as exc:
+        logger.error("Failed to ingest documents into %s: %s", request.index, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to ingest documents: {exc}",
+        ) from exc
+
+    logger.info(
+        "Ingested %d documents into index=%s by user=%s",
+        len(request.documents),
+        request.index,
+        user.identity,
+    )
+    return {"ok": True, "index": request.index, "ingested": len(request.documents)}
+
+
+class ArticleChatRequest(BaseModel):
+    message: str
+    index_name: str
+    force: bool = False
+
+
+@app.post("/custom/articles/chat")
+async def article_chat(
+    request: ArticleChatRequest,
+    user: User = Depends(require_auth),
+):
+    """Chat with AI over a selected OpenSearch index. Retrieval runs automatically."""
+    config = _load_articles_config()
+    if not config:
+        raise HTTPException(status_code=400, detail="No articles config saved. Configure indexes first.")
+
+    index_name = request.index_name.strip()
+    if not index_name:
+        raise HTTPException(status_code=400, detail="No index selected. Choose an index before chatting.")
+
+    client = _opensearch_client(config)
+
+    try:
+        if not client.indices.exists(index=index_name):
+            raise HTTPException(status_code=404, detail=f"Index '{index_name}' does not exist")
+    except TransportError as exc:
+        logger.error("Failed to check index existence: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
+        ) from exc
+
+    # Check embedding model mismatch
+    if not request.force:
+        try:
+            mapping = client.indices.get_mapping(index=index_name)
+            stored_model = _articles_index_metadata(mapping, index_name).get("embedding_model")
+            if stored_model and stored_model != config["embedding_model"]:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Embedding model mismatch: index uses '{stored_model}', "
+                        f"config has '{config['embedding_model']}'. Contact an administrator."
+                    ),
+                )
+        except HTTPException:
+            raise
+        except TransportError:
+            pass
+
+    try:
+        vector_store = _vector_store_for_index(index_name, config)
+        query = request.message.strip()
+        results = vector_store.similarity_search(query, k=5)
+    except Exception as exc:
+        logger.error("Failed to query index %s: %s", index_name, exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Could not query index '{index_name}': {exc}",
+        ) from exc
+
+    if not results:
+        context_text = ""
+    else:
+        context_parts = []
+        for i, doc in enumerate(results):
+            source = doc.metadata.get("source", doc.metadata.get("file_name", "unknown"))
+            context_parts.append(f"[Document {i + 1}] Source: {source}\n{doc.page_content}")
+        context_text = "\n\n---\n\n".join(context_parts)
+
+    prompt = f"Use the following retrieved context to answer the question. If the context does not contain relevant information, say so clearly.\n\n{context_text}\n\n---\n\nQuestion: {query}"
+
+    try:
+        model = load_chat_model(_get_configured_model())
+        response = await model.ainvoke([HumanMessage(content=prompt)])
+        answer = get_message_text(response).strip()
+    except Exception as exc:
+        logger.error("Model generation failed: %s", exc)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Model generation failed: {exc}",
+        ) from exc
+
+    logger.info(
+        "Article chat completed index=%s user=%s",
+        index_name,
+        user.identity,
+    )
+    return {
+        "answer": answer,
+        "index": index_name,
+        "retrieved_count": len(results),
     }

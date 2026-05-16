@@ -12,6 +12,7 @@ wheels/
 # env files
 .env
 keycloak-realm-aegra.json
+.aegra-articles.json
 
 # Pycharm
 .idea/
