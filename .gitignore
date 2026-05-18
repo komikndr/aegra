@@ -42,4 +42,6 @@ session-ses_*.md
 .DS_Store
 
 # Claude
+opencode.json
+.opencode/
 .claude/
