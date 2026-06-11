@@ -75,7 +75,7 @@ services:
       MINIO_OIDC_REDIRECT_URI: ${MINIO_OIDC_REDIRECT_URI:-http://10.10.5.190:9001/oauth_callback}
       MINIO_OIDC_WEB_ORIGIN: ${MINIO_OIDC_WEB_ORIGIN:-http://10.10.5.190:9001}
     volumes:
-      - ./ops/keycloak/init-minio-client.sh:/opt/keycloak-init/init-minio-client.sh:ro
+      - ./ops/keycloak:/opt/keycloak-init:ro
     entrypoint: ["/bin/sh", "/opt/keycloak-init/init-minio-client.sh"]
     restart: "no"
 

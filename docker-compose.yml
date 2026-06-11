@@ -47,13 +47,10 @@ services:
       retries: 3
       start_period: 10s
     volumes:
-      - ./aegra.json:/app/aegra.json:ro
       - ./examples:/app/examples:ro
       - ./graphs:/app/graphs:ro
       - ./libs/aegra-api/src:/app/src:ro  # Mount full src for PYTHONPATH to work
       - ./libs/aegra-api/alembic:/app/alembic:ro # for migrations
-      - ./keycloak_auth.py:/app/keycloak_auth.py:ro
-      - ./custom_routes_example.py:/app/custom_routes_example.py:ro
     command: ["uvicorn", "aegra_api.main:app", "--host", "0.0.0.0", "--port", "${PORT:-2026}", "--reload"]
 
   # Keycloak (production mode)
@@ -89,7 +86,7 @@ services:
       - MINIO_OIDC_CLIENT_SECRET=${MINIO_OIDC_CLIENT_SECRET:-minio-console-local-secret}
       - MINIO_OIDC_REDIRECT_URI=${MINIO_OIDC_REDIRECT_URI:-http://localhost:9001/oauth_callback}
     volumes:
-      - ./ops/keycloak/init-minio-client.sh:/opt/keycloak-init/init-minio-client.sh:ro
+      - ./ops/keycloak:/opt/keycloak-init:ro
     entrypoint: ["/bin/sh", "/opt/keycloak-init/init-minio-client.sh"]
     restart: "no"
 

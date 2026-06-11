@@ -73,7 +73,7 @@ from react_agent.utils import (
     load_chat_model,
     resolve_model_name,
 )
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.agent_access import ensure_graph_access
@@ -992,6 +992,13 @@ async def replace_executive_artifacts(
     session: AsyncSession = Depends(get_session),
 ):
     await _get_user_thread(session, thread_id, user)
+    await session.execute(
+        text("SELECT pg_advisory_xact_lock(hashtext(:scope), hashtext(:thread_key))"),
+        {
+            "scope": f"executive_artifacts:{user.identity}",
+            "thread_key": thread_id,
+        },
+    )
 
     body = await request.body()
     content_type = request.headers.get("content-type", "")

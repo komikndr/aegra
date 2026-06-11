@@ -194,6 +194,10 @@ def load_chat_model(
             init_kwargs["base_url"] = resolved_base_url
         if api_key is not None:
             init_kwargs["api_key"] = api_key
+        elif resolved_base_url and not _is_official_openai_base_url(resolved_base_url):
+            # OpenAI-compatible local endpoints still require a non-null api_key
+            # argument at client construction time, even when the server ignores it.
+            init_kwargs["api_key"] = os.environ.get("OPENAI_API_KEY", "local")
 
     return init_chat_model(model, **init_kwargs)
 
