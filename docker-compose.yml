@@ -51,6 +51,7 @@ services:
       - ./graphs:/app/graphs:ro
       - ./libs/aegra-api/src:/app/src:ro  # Mount full src for PYTHONPATH to work
       - ./libs/aegra-api/alembic:/app/alembic:ro # for migrations
+      - ./analytic_test.db:/app/analytic_test.db:ro
     command: ["uvicorn", "aegra_api.main:app", "--host", "0.0.0.0", "--port", "${PORT:-2026}", "--reload"]
 
   # Keycloak (production mode)

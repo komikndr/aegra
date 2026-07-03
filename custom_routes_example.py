@@ -43,23 +43,27 @@ import io
 import json
 import logging
 import os
+import re
 import secrets
 import sys
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote_plus
 
 _GRAPHS_DIR = Path(__file__).resolve().parent / "graphs"
 if _GRAPHS_DIR.exists() and str(_GRAPHS_DIR) not in sys.path:
     sys.path.insert(0, str(_GRAPHS_DIR))
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.encoders import jsonable_encoder
 from langchain_community.vectorstores import OpenSearchVectorSearch
 from langchain_core.documents import Document
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import OpenAIEmbeddings
 from opensearchpy import OpenSearch as OpenSearchClient
 from opensearchpy import TransportError
@@ -73,7 +77,9 @@ from react_agent.utils import (
     load_chat_model,
     resolve_model_name,
 )
-from sqlalchemy import delete, select, text
+from sqlalchemy import create_engine, delete, inspect, select, text
+from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.agent_access import ensure_graph_access
@@ -155,6 +161,668 @@ class PipelineExecuteRequest(BaseModel):
     data: Any = None
     rows: list[Any] | None = None
     dryRun: bool = False
+
+
+class DbChatQueryRequest(BaseModel):
+    sql: str
+    limit: int = Field(default=200, ge=1, le=1000)
+
+
+class DbChatSelectedTable(BaseModel):
+    database: str | None = None
+    schema: str | None = None
+    table: str
+
+
+class DbChatMessage(BaseModel):
+    role: str
+    content: str
+
+
+class DbChatChatRequest(BaseModel):
+    message: str
+    history: list[DbChatMessage] = Field(default_factory=list)
+    selectedTable: DbChatSelectedTable | None = None
+    reasoningEffort: str | None = Field(default="low")
+
+
+class DbChatAdapter(ABC):
+    connection_id: str
+    title: str
+
+    @abstractmethod
+    def connection_info(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def catalog(self, include_system: bool = False) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def tree(self, include_system: bool = False) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def describe_table(self, table: str, schema: str | None = None, database: str | None = None) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def preview_table(
+        self,
+        table: str,
+        schema: str | None = None,
+        database: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def query(self, sql: str, limit: int = 200) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+READ_ONLY_SQL_PREFIXES = ("select", "with", "show", "describe", "explain")
+FORBIDDEN_DBCHAT_SQL_KEYWORDS = (
+    "alter",
+    "attach",
+    "call",
+    "copy",
+    "create",
+    "delete",
+    "drop",
+    "grant",
+    "insert",
+    "merge",
+    "replace",
+    "revoke",
+    "truncate",
+    "update",
+    "vacuum",
+)
+SYSTEM_SCHEMAS = {
+    "information_schema",
+    "pg_catalog",
+    "pg_toast",
+    "sys",
+    "system",
+}
+
+
+def _build_analytic_database_url() -> str | None:
+    database_url = os.environ.get("ANALYTIC_DB_URL", "").strip()
+    if database_url:
+        return database_url
+
+    dialect = os.environ.get("ANALYTIC_DB_DIALECT", "sqlite").strip().lower()
+    db_name = os.environ.get("ANALYTIC_DB_NAME", "").strip()
+    if dialect == "sqlite":
+        if not db_name:
+            return None
+        if db_name == ":memory:":
+            return "sqlite:///:memory:"
+        if db_name.startswith("/"):
+            return f"sqlite:///{db_name}"
+        return f"sqlite:///./{db_name}"
+
+    host = os.environ.get("ANALYTIC_DB_HOST", "").strip()
+    user = os.environ.get("ANALYTIC_DB_USER", "").strip()
+    password = os.environ.get("ANALYTIC_DB_PASSWORD", "").strip()
+    if not all([host, db_name, user]):
+        return None
+
+    driver = "postgresql+psycopg" if dialect in {"postgres", "postgresql"} else dialect
+    port = os.environ.get("ANALYTIC_DB_PORT", "").strip()
+    port_part = f":{port}" if port else ""
+    auth_part = quote_plus(user)
+    if password:
+        auth_part = f"{auth_part}:{quote_plus(password)}"
+    return f"{driver}://{auth_part}@{host}{port_part}/{db_name}"
+
+
+@lru_cache(maxsize=8)
+def _get_dbchat_engine(database_url: str) -> Engine:
+    return create_engine(database_url, future=True)
+
+
+def _is_system_schema(schema: str | None) -> bool:
+    if schema is None:
+        return False
+    lowered = schema.lower()
+    return lowered in SYSTEM_SCHEMAS or lowered.startswith("pg_temp_") or lowered.startswith("pg_toast_temp_")
+
+
+def _is_read_only_dbchat_sql(sql: str) -> bool:
+    normalized = " ".join(sql.strip().strip(";").lower().split())
+    if not normalized.startswith(READ_ONLY_SQL_PREFIXES):
+        return False
+    guarded = f" {normalized} "
+    return not any(f" {keyword} " in guarded for keyword in FORBIDDEN_DBCHAT_SQL_KEYWORDS)
+
+
+def _json_safe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return jsonable_encoder(rows)
+
+
+def _first_row_value(row: Any) -> Any:
+    if hasattr(row, "_mapping"):
+        values = list(row._mapping.values())
+        return values[0] if values else None
+    if isinstance(row, tuple):
+        return row[0] if row else None
+    return row
+
+
+def _quote_identifier(value: str) -> str:
+    return '"' + value.replace('"', '""') + '"'
+
+
+class SqlAlchemyDbChatAdapter(DbChatAdapter):
+    def __init__(self, connection_id: str, title: str, engine: Engine) -> None:
+        self.connection_id = connection_id
+        self.title = title
+        self.engine = engine
+
+    def connection_info(self) -> dict[str, Any]:
+        return {
+            "id": self.connection_id,
+            "title": self.title,
+            "engineId": self.engine.dialect.name,
+            "dialect": self.engine.dialect.name,
+            "configured": True,
+            "capabilities": {
+                "catalog": True,
+                "query": True,
+                "tablePreview": True,
+                "sqlroomsCatalog": True,
+            },
+        }
+
+    def _database_name(self) -> str:
+        return self.engine.url.database or self.connection_id
+
+    def _schemas(self, include_system: bool) -> list[str | None]:
+        inspector = inspect(self.engine)
+        try:
+            schemas = inspector.get_schema_names()
+        except SQLAlchemyError:
+            schemas = [None]
+        filtered = [schema for schema in schemas if include_system or not _is_system_schema(schema)]
+        return filtered or [None]
+
+    def catalog(self, include_system: bool = False) -> dict[str, Any]:
+        inspector = inspect(self.engine)
+        database = self._database_name()
+        schemas: list[dict[str, Any]] = []
+        tables: list[dict[str, Any]] = []
+
+        for schema in self._schemas(include_system):
+            if schema is not None:
+                schemas.append({"database": database, "schema": schema})
+            for table_name in inspector.get_table_names(schema=schema):
+                tables.append({"database": database, "schema": schema, "table": table_name, "isView": False})
+            for view_name in inspector.get_view_names(schema=schema):
+                tables.append({"database": database, "schema": schema, "table": view_name, "isView": True})
+
+        return {
+            "connectionId": self.connection_id,
+            "engineId": self.engine.dialect.name,
+            "databases": [{"database": database}],
+            "schemas": schemas,
+            "tables": tables,
+        }
+
+    def tree(self, include_system: bool = False) -> dict[str, Any]:
+        catalog = self.catalog(include_system=include_system)
+        database_name = catalog["databases"][0]["database"] if catalog["databases"] else self._database_name()
+        schema_nodes: list[dict[str, Any]] = []
+
+        for schema_record in catalog["schemas"] or [{"schema": None}]:
+            schema_name = schema_record.get("schema")
+            schema_tables = [table for table in catalog["tables"] if table.get("schema") == schema_name]
+            table_nodes = [
+                {
+                    "id": f"{self.connection_id}:table:{schema_name or ''}:{table['table']}",
+                    "kind": "view" if table.get("isView") else "table",
+                    "name": table["table"],
+                    "schema": schema_name,
+                    "database": database_name,
+                    "isView": table.get("isView", False),
+                }
+                for table in schema_tables
+            ]
+            schema_nodes.append(
+                {
+                    "id": f"{self.connection_id}:schema:{schema_name or 'default'}",
+                    "kind": "schema",
+                    "name": schema_name or "default",
+                    "database": database_name,
+                    "children": [
+                        {
+                            "id": f"{self.connection_id}:schema:{schema_name or 'default'}:tables",
+                            "kind": "group",
+                            "name": "Tables",
+                            "children": [node for node in table_nodes if not node["isView"]],
+                        },
+                        {
+                            "id": f"{self.connection_id}:schema:{schema_name or 'default'}:views",
+                            "kind": "group",
+                            "name": "Views",
+                            "children": [node for node in table_nodes if node["isView"]],
+                        },
+                    ],
+                }
+            )
+
+        return {
+            "connection": self.connection_info(),
+            "tree": {
+                "id": self.connection_id,
+                "kind": "connection",
+                "name": self.title,
+                "children": [
+                    {
+                        "id": f"{self.connection_id}:database:{database_name}",
+                        "kind": "database",
+                        "name": database_name,
+                        "children": schema_nodes,
+                    }
+                ],
+            },
+            "catalog": catalog,
+        }
+
+    def describe_table(self, table: str, schema: str | None = None, database: str | None = None) -> dict[str, Any]:
+        inspector = inspect(self.engine)
+        columns = inspector.get_columns(table, schema=schema)
+        indexes = inspector.get_indexes(table, schema=schema)
+        return {
+            "connectionId": self.connection_id,
+            "database": database or self._database_name(),
+            "schema": schema,
+            "table": table,
+            "columns": [
+                {
+                    "name": column["name"],
+                    "type": str(column["type"]),
+                    "nullable": column.get("nullable", True),
+                    "default": column.get("default"),
+                }
+                for column in columns
+            ],
+            "indexes": jsonable_encoder(indexes),
+        }
+
+    def _qualified_table_name(self, table: str, schema: str | None = None, database: str | None = None) -> str:
+        preparer = self.engine.dialect.identifier_preparer
+        parts = [part for part in [schema, table] if part]
+        if self.engine.dialect.name == "trino" and database:
+            parts = [database, *parts]
+        return ".".join(preparer.quote(part) for part in parts)
+
+    def preview_table(
+        self,
+        table: str,
+        schema: str | None = None,
+        database: str | None = None,
+        limit: int = 50,
+    ) -> dict[str, Any]:
+        safe_limit = max(1, min(limit, 200))
+        qualified_table = self._qualified_table_name(table, schema=schema, database=database)
+        sql = f"SELECT * FROM {qualified_table} LIMIT {safe_limit}"
+        return self.query(sql, limit=safe_limit)
+
+    def query(self, sql: str, limit: int = 200) -> dict[str, Any]:
+        if not _is_read_only_dbchat_sql(sql):
+            raise HTTPException(status_code=400, detail="Only read-only SQL is allowed for DBChat.")
+        safe_limit = max(1, min(limit, 1000))
+        with self.engine.connect() as connection:
+            result = connection.execute(text(sql))
+            rows = [dict(row) for row in result.mappings().fetchmany(safe_limit)]
+            return {
+                "connectionId": self.connection_id,
+                "engineId": self.engine.dialect.name,
+                "columns": list(result.keys()),
+                "rows": _json_safe_rows(rows),
+                "rowCount": len(rows),
+                "limit": safe_limit,
+            }
+
+
+class TrinoDbChatAdapter(SqlAlchemyDbChatAdapter):
+    def _fetch_first_column(self, sql: str) -> list[str]:
+        with self.engine.connect() as connection:
+            result = connection.execute(text(sql))
+            return [str(_first_row_value(row)) for row in result.fetchall() if _first_row_value(row) is not None]
+
+    def catalog(self, include_system: bool = False) -> dict[str, Any]:
+        catalogs = self._fetch_first_column("SHOW CATALOGS")
+        databases = [{"database": catalog} for catalog in catalogs]
+        schemas: list[dict[str, Any]] = []
+        tables: list[dict[str, Any]] = []
+
+        for catalog_name in catalogs:
+            try:
+                catalog_schemas = self._fetch_first_column(f"SHOW SCHEMAS FROM {_quote_identifier(catalog_name)}")
+            except SQLAlchemyError:
+                continue
+            for schema_name in catalog_schemas:
+                if not include_system and _is_system_schema(schema_name):
+                    continue
+                schemas.append({"database": catalog_name, "schema": schema_name})
+                try:
+                    table_names = self._fetch_first_column(
+                        f"SHOW TABLES FROM {_quote_identifier(catalog_name)}.{_quote_identifier(schema_name)}"
+                    )
+                except SQLAlchemyError:
+                    continue
+                for table_name in table_names:
+                    tables.append(
+                        {"database": catalog_name, "schema": schema_name, "table": table_name, "isView": False}
+                    )
+
+        return {
+            "connectionId": self.connection_id,
+            "engineId": self.engine.dialect.name,
+            "databases": databases,
+            "schemas": schemas,
+            "tables": tables,
+        }
+
+    def describe_table(self, table: str, schema: str | None = None, database: str | None = None) -> dict[str, Any]:
+        if not database or not schema:
+            return super().describe_table(table, schema=schema, database=database)
+        sql = f"DESCRIBE {_quote_identifier(database)}.{_quote_identifier(schema)}.{_quote_identifier(table)}"
+        with self.engine.connect() as connection:
+            result = connection.execute(text(sql))
+            columns = []
+            for row in result.fetchall():
+                values = list(row._mapping.values()) if hasattr(row, "_mapping") else list(row)
+                if len(values) < 2:
+                    continue
+                columns.append({"name": values[0], "type": values[1], "nullable": None, "default": None})
+        return {
+            "connectionId": self.connection_id,
+            "database": database,
+            "schema": schema,
+            "table": table,
+            "columns": columns,
+            "indexes": [],
+        }
+
+
+def _get_dbchat_adapter(connection_id: str) -> DbChatAdapter:
+    if connection_id != "analytic":
+        raise HTTPException(status_code=404, detail=f"DBChat connection '{connection_id}' was not found")
+
+    database_url = _build_analytic_database_url()
+    if not database_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Analytic database is not configured. Set ANALYTIC_DB_URL or ANALYTIC_DB_* env vars first.",
+        )
+
+    try:
+        engine = _get_dbchat_engine(database_url)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Could not create analytic database engine: {exc}") from exc
+
+    if engine.dialect.name == "trino":
+        return TrinoDbChatAdapter(connection_id="analytic", title="Analytic Trino", engine=engine)
+    return SqlAlchemyDbChatAdapter(connection_id="analytic", title="Analytic Database", engine=engine)
+
+
+def _available_dbchat_connections() -> list[dict[str, Any]]:
+    database_url = _build_analytic_database_url()
+    if not database_url:
+        return [
+            {
+                "id": "analytic",
+                "title": "Analytic Database",
+                "engineId": os.environ.get("ANALYTIC_DB_DIALECT", "unknown"),
+                "dialect": os.environ.get("ANALYTIC_DB_DIALECT", "unknown"),
+                "configured": False,
+                "capabilities": {"catalog": False, "query": False},
+            }
+        ]
+
+    try:
+        adapter = _get_dbchat_adapter("analytic")
+        return [adapter.connection_info()]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        return [
+            {
+                "id": "analytic",
+                "title": "Analytic Database",
+                "engineId": os.environ.get("ANALYTIC_DB_DIALECT", "unknown"),
+                "dialect": os.environ.get("ANALYTIC_DB_DIALECT", "unknown"),
+                "configured": True,
+                "error": str(exc),
+                "capabilities": {"catalog": False, "query": False},
+            }
+        ]
+
+
+def _format_dbchat_scope(adapter: DbChatAdapter, selected_table: DbChatSelectedTable | None) -> str:
+    if selected_table is not None:
+        details = adapter.describe_table(
+            table=selected_table.table,
+            schema=selected_table.schema,
+            database=selected_table.database,
+        )
+        columns = details.get("columns") if isinstance(details, dict) else []
+        column_lines = []
+        if isinstance(columns, list):
+            for column in columns[:80]:
+                if not isinstance(column, dict):
+                    continue
+                name = column.get("name")
+                column_type = column.get("type")
+                nullable = column.get("nullable")
+                nullability = " nullable" if nullable is not False else " not null"
+                column_lines.append(f"- {name}: {column_type}{nullability}")
+        qualified = ".".join(
+            part
+            for part in [selected_table.database, selected_table.schema, selected_table.table]
+            if part
+        )
+        return "Selected table:\n" + qualified + "\nColumns:\n" + ("\n".join(column_lines) or "No columns returned.")
+
+    catalog = adapter.catalog(include_system=False)
+    tables = catalog.get("tables") if isinstance(catalog, dict) else []
+    table_lines = []
+    if isinstance(tables, list):
+        for table_record in tables[:80]:
+            if not isinstance(table_record, dict):
+                continue
+            qualified = ".".join(
+                str(part)
+                for part in [table_record.get("database"), table_record.get("schema"), table_record.get("table")]
+                if part
+            )
+            if qualified:
+                suffix = " view" if table_record.get("isView") else " table"
+                table_lines.append(f"- {qualified} ({suffix})")
+    return "Available tables/views:\n" + ("\n".join(table_lines) or "No tables returned.")
+
+
+def _dbchat_history_messages(history: list[DbChatMessage]) -> list[HumanMessage | AIMessage]:
+    messages: list[HumanMessage | AIMessage] = []
+    for item in history[-8:]:
+        content = item.content.strip()
+        if not content:
+            continue
+        if item.role.strip().lower() == "assistant":
+            messages.append(AIMessage(content=content[:4000]))
+        else:
+            messages.append(HumanMessage(content=content[:4000]))
+    return messages
+
+
+def _split_dbchat_inline_thinking(text: str) -> tuple[str, str]:
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    cursor = 0
+
+    while cursor < len(text):
+        next_open = text.find("<think>", cursor)
+        if next_open == -1:
+            content_parts.append(text[cursor:])
+            break
+
+        content_parts.append(text[cursor:next_open])
+        reasoning_start = next_open + len("<think>")
+        next_close = text.find("</think>", reasoning_start)
+        if next_close == -1:
+            reasoning_parts.append(text[reasoning_start:])
+            break
+        reasoning_parts.append(text[reasoning_start:next_close])
+        cursor = next_close + len("</think>")
+
+    return "".join(content_parts), "".join(reasoning_parts)
+
+
+def _extract_dbchat_reasoning_from_value(value: Any) -> str:
+    if isinstance(value, str):
+        return _split_dbchat_inline_thinking(value)[1].strip()
+
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                reasoning = _split_dbchat_inline_thinking(item)[1].strip()
+                if reasoning:
+                    parts.append(reasoning)
+                continue
+            if isinstance(item, dict):
+                item_type = str(item.get("type", "")).lower()
+                if item_type in {"thinking", "reasoning", "reasoning_content"}:
+                    direct = item.get("text") or item.get("content")
+                    if isinstance(direct, str) and direct.strip():
+                        parts.append(direct.strip())
+                    continue
+                nested = _extract_dbchat_reasoning_from_value(item)
+                if nested:
+                    parts.append(nested)
+        return "\n".join(parts).strip()
+
+    if not isinstance(value, dict):
+        return ""
+
+    for key in ("reasoning_content", "reasoning", "thinking"):
+        direct = value.get(key)
+        if isinstance(direct, str) and direct.strip():
+            return direct.strip()
+
+    content_reasoning = _extract_dbchat_reasoning_from_value(value.get("content"))
+    if content_reasoning:
+        return content_reasoning
+
+    for key in ("additional_kwargs", "response_metadata", "kwargs", "message", "delta", "raw", "chunk", "data"):
+        nested = value.get(key)
+        if isinstance(nested, (dict, list)):
+            nested_reasoning = _extract_dbchat_reasoning_from_value(nested)
+            if nested_reasoning:
+                return nested_reasoning
+
+    choices = value.get("choices")
+    if isinstance(choices, list):
+        for choice in choices:
+            reasoning = _extract_dbchat_reasoning_from_value(choice)
+            if reasoning:
+                return reasoning
+
+    return ""
+
+
+def _extract_dbchat_reasoning(message: Any) -> str:
+    sources: list[Any] = [message]
+    for attr in ("additional_kwargs", "response_metadata", "content"):
+        if hasattr(message, attr):
+            sources.append(getattr(message, attr))
+
+    for source in sources:
+        reasoning = _extract_dbchat_reasoning_from_value(source)
+        if reasoning:
+            return reasoning[:16000]
+    return ""
+
+
+def _get_dbchat_visible_message_text(message: Any) -> str:
+    content = getattr(message, "content", None)
+    if isinstance(content, str):
+        return _split_dbchat_inline_thinking(content)[0].strip()
+    if isinstance(content, list):
+        parts: list[str] = []
+        for item in content:
+            if isinstance(item, str):
+                parts.append(_split_dbchat_inline_thinking(item)[0])
+                continue
+            if not isinstance(item, dict):
+                continue
+            item_type = str(item.get("type", "")).lower()
+            if item_type in {"thinking", "reasoning", "reasoning_content"}:
+                continue
+            for key in ("text", "content"):
+                value = item.get(key)
+                if isinstance(value, str):
+                    parts.append(_split_dbchat_inline_thinking(value)[0])
+                    break
+        return "".join(parts).strip()
+    return _split_dbchat_inline_thinking(get_message_text(message))[0].strip()
+
+
+def _normalize_dbchat_reasoning_effort(value: str | None) -> str | None:
+    if not value:
+        return "low"
+    normalized = value.strip().lower()
+    if normalized in {"none", "low", "medium", "high", "ultra"}:
+        return normalized
+    return "low"
+
+
+def _dbchat_user_wants_rows(message: str) -> bool:
+    lowered = message.lower()
+    return any(
+        keyword in lowered
+        for keyword in (
+            "show",
+            "preview",
+            "sample",
+            "records",
+            "rows",
+            "data",
+            "lihat",
+            "tampil",
+        )
+    )
+
+
+def _dbchat_selected_table_sql(adapter: DbChatAdapter, selected_table: DbChatSelectedTable | None, limit: int = 10) -> str | None:
+    if selected_table is None:
+        return None
+    if isinstance(adapter, SqlAlchemyDbChatAdapter):
+        qualified_table = adapter._qualified_table_name(  # noqa: SLF001 - adapter-owned SQL quoting helper
+            selected_table.table,
+            schema=selected_table.schema,
+            database=selected_table.database,
+        )
+    else:
+        parts = [part for part in [selected_table.database, selected_table.schema, selected_table.table] if part]
+        qualified_table = ".".join(_quote_identifier(part) for part in parts)
+    return f"SELECT * FROM {qualified_table} LIMIT {max(1, min(limit, 100))}"
+
+
+def _extract_dbchat_sql(text: str) -> str | None:
+    fenced_match = re.search(r"```sql\s*(.*?)\s*```", text, flags=re.IGNORECASE | re.DOTALL)
+    if fenced_match:
+        return fenced_match.group(1).strip().rstrip(";")
+
+    statement_match = re.search(r"\b(select|with|show|describe|explain)\b[\s\S]*?(?:;|$)", text, flags=re.IGNORECASE)
+    if not statement_match:
+        return None
+    return statement_match.group(0).strip().rstrip(";")
 
 
 def _normalize_base64(encoded_value: str) -> str:
@@ -701,6 +1369,180 @@ async def model_info(agent_id: str | None = Query(default=None, alias="agentId")
         "safety_buffer": model_config.safety_buffer,
         "min_recent_messages": model_config.min_recent_messages,
     }
+
+
+@app.get("/dbchat/connections")
+async def list_dbchat_connections(user: User = Depends(require_auth)):
+    """List DBChat connections. Currently exposes the configured analytic DB connection."""
+    return {"connections": _available_dbchat_connections(), "user": user.identity}
+
+
+@app.get("/dbchat/connections/{connection_id}/catalog")
+async def get_dbchat_catalog(
+    connection_id: str,
+    include_system: bool = Query(default=False, alias="includeSystem"),
+    user: User = Depends(require_auth),
+):
+    """Return SQLRooms-compatible catalog arrays: databases, schemas, tables."""
+    try:
+        adapter = _get_dbchat_adapter(connection_id)
+        return adapter.catalog(include_system=include_system)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.warning("DBChat catalog failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
+        raise HTTPException(status_code=502, detail=f"Could not read database catalog: {exc}") from exc
+
+
+@app.get("/dbchat/connections/{connection_id}/tree")
+async def get_dbchat_tree(
+    connection_id: str,
+    include_system: bool = Query(default=False, alias="includeSystem"),
+    user: User = Depends(require_auth),
+):
+    """Return a normalized side-panel tree for DBChat schema browsing."""
+    try:
+        adapter = _get_dbchat_adapter(connection_id)
+        return adapter.tree(include_system=include_system)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.warning("DBChat tree failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
+        raise HTTPException(status_code=502, detail=f"Could not read database tree: {exc}") from exc
+
+
+@app.get("/dbchat/connections/{connection_id}/tables/{table}/columns")
+async def describe_dbchat_table(
+    connection_id: str,
+    table: str,
+    schema: str | None = Query(default=None),
+    database: str | None = Query(default=None),
+    user: User = Depends(require_auth),
+):
+    """Describe a table or view, including columns and adapter-provided index metadata."""
+    try:
+        adapter = _get_dbchat_adapter(connection_id)
+        return adapter.describe_table(table=table, schema=schema, database=database)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "DBChat describe failed connection=%s table=%s schema=%s user=%s error=%s",
+            connection_id,
+            table,
+            schema,
+            user.identity,
+            exc,
+        )
+        raise HTTPException(status_code=502, detail=f"Could not describe table: {exc}") from exc
+
+
+@app.get("/dbchat/connections/{connection_id}/tables/{table}/sample")
+async def preview_dbchat_table(
+    connection_id: str,
+    table: str,
+    schema: str | None = Query(default=None),
+    database: str | None = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    user: User = Depends(require_auth),
+):
+    """Return a limited read-only preview of a table or view."""
+    try:
+        adapter = _get_dbchat_adapter(connection_id)
+        return adapter.preview_table(table=table, schema=schema, database=database, limit=limit)
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.warning(
+            "DBChat preview failed connection=%s table=%s schema=%s user=%s error=%s",
+            connection_id,
+            table,
+            schema,
+            user.identity,
+            exc,
+        )
+        raise HTTPException(status_code=502, detail=f"Could not preview table: {exc}") from exc
+
+
+@app.post("/dbchat/connections/{connection_id}/query")
+async def query_dbchat_connection(
+    connection_id: str,
+    payload: DbChatQueryRequest,
+    user: User = Depends(require_auth),
+):
+    """Run a read-only SQL query and return JSON rows for the DBChat workbench."""
+    try:
+        adapter = _get_dbchat_adapter(connection_id)
+        result = adapter.query(payload.sql, limit=payload.limit)
+        logger.info(
+            "DBChat query completed connection=%s user=%s rows=%s",
+            connection_id,
+            user.identity,
+            result.get("rowCount"),
+        )
+        return result
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.warning("DBChat query failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
+        raise HTTPException(status_code=502, detail=f"Could not execute query: {exc}") from exc
+
+
+@app.post("/dbchat/connections/{connection_id}/chat")
+async def chat_dbchat_connection(
+    connection_id: str,
+    payload: DbChatChatRequest,
+    user: User = Depends(require_auth),
+):
+    """Answer DBChat questions using compact schema context and safe read-only result previews."""
+    message = payload.message.strip()
+    if not message:
+        raise HTTPException(status_code=422, detail="message is required")
+
+    try:
+        adapter = _get_dbchat_adapter(connection_id)
+        scope = _format_dbchat_scope(adapter, payload.selectedTable)
+        model_name = _get_configured_model()
+        model = load_chat_model(model_name)
+        model = apply_reasoning_effort(model, model_name, _normalize_dbchat_reasoning_effort(payload.reasoningEffort))
+        system_prompt = (
+            "You are DBChat, a concise data analyst assistant embedded in a SQL workbench. "
+            "Use the provided schema context to answer database questions, suggest safe read-only SQL, "
+            "and explain table relationships when possible. When the user asks to see data, include one fenced SQL block. "
+            "If the schema context is insufficient, say what table or column is needed.\n\n"
+            f"Connection: {adapter.title} ({adapter.connection_info().get('engineId', 'database')})\n"
+            f"Schema context:\n{scope}"
+        )
+        response = await model.ainvoke(
+            [
+                SystemMessage(content=system_prompt),
+                *_dbchat_history_messages(payload.history),
+                HumanMessage(content=message[:8000]),
+            ]
+        )
+        answer = _get_dbchat_visible_message_text(response)
+        reasoning = _extract_dbchat_reasoning(response)
+        generated_sql = _dbchat_selected_table_sql(adapter, payload.selectedTable) if _dbchat_user_wants_rows(message) else None
+        generated_sql = generated_sql or _extract_dbchat_sql(answer)
+        query_result: dict[str, Any] | None = None
+        if generated_sql and _is_read_only_dbchat_sql(generated_sql):
+            query_result = adapter.query(generated_sql, limit=50)
+        if query_result is not None and _dbchat_user_wants_rows(message):
+            answer = f"Showing the first {query_result.get('rowCount', 0)} rows returned by this read-only query."
+        logger.info("DBChat chat completed connection=%s user=%s", connection_id, user.identity)
+        return {
+            "connectionId": connection_id,
+            "response": answer or "I could not produce a DBChat response.",
+            "reasoning": reasoning,
+            "generatedSql": generated_sql,
+            "queryResult": query_result,
+            "selectedTable": payload.selectedTable.model_dump() if payload.selectedTable else None,
+        }
+    except HTTPException:
+        raise
+    except SQLAlchemyError as exc:
+        logger.warning("DBChat chat schema failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
+        raise HTTPException(status_code=502, detail=f"Could not read database schema for chat: {exc}") from exc
 
 
 @app.get("/pipeline/models")
