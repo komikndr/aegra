@@ -22,7 +22,8 @@
         "analytic_chat": "./graphs/analytic_agent/graph.py:chat_graph",
         "analytic_executive": "./graphs/analytic_agent/graph.py:executive_graph",
         "analytic_office": "./graphs/analytic_agent/graph.py:office_graph",
-        "analytic_artifact_editor": "./graphs/analytic_agent/graph.py:artifact_editor_graph"
+        "analytic_artifact_editor": "./graphs/analytic_agent/graph.py:artifact_editor_graph",
+        "analytic_dbchat": "./graphs/dbchat_agent/graph.py:graph"
     },
     "http": {"app": "./custom_routes_example.py:app", "enable_custom_route_auth": true},
     "auth": {"path": "./keycloak_auth.py:auth"}

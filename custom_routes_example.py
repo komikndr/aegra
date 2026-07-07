@@ -183,6 +183,8 @@ class DbChatChatRequest(BaseModel):
     message: str
     history: list[DbChatMessage] = Field(default_factory=list)
     selectedTable: DbChatSelectedTable | None = None
+    selectedTables: list[DbChatSelectedTable] = Field(default_factory=list)
+    contextMode: str | None = Field(default="suggest")
     reasoningEffort: str | None = Field(default="low")
 
 
@@ -604,36 +606,63 @@ def _available_dbchat_connections() -> list[dict[str, Any]]:
         ]
 
 
-def _format_dbchat_scope(adapter: DbChatAdapter, selected_table: DbChatSelectedTable | None) -> str:
-    if selected_table is not None:
-        details = adapter.describe_table(
-            table=selected_table.table,
-            schema=selected_table.schema,
-            database=selected_table.database,
-        )
-        columns = details.get("columns") if isinstance(details, dict) else []
-        column_lines = []
-        if isinstance(columns, list):
-            for column in columns[:80]:
-                if not isinstance(column, dict):
-                    continue
-                name = column.get("name")
-                column_type = column.get("type")
-                nullable = column.get("nullable")
-                nullability = " nullable" if nullable is not False else " not null"
-                column_lines.append(f"- {name}: {column_type}{nullability}")
-        qualified = ".".join(
-            part
-            for part in [selected_table.database, selected_table.schema, selected_table.table]
-            if part
-        )
-        return "Selected table:\n" + qualified + "\nColumns:\n" + ("\n".join(column_lines) or "No columns returned.")
+def _dbchat_qualified_table_label(table: DbChatSelectedTable) -> str:
+    return ".".join(part for part in [table.database, table.schema, table.table] if part)
 
+
+def _dbchat_table_key(table: DbChatSelectedTable) -> tuple[str, str, str]:
+    return (table.database or "", table.schema or "", table.table)
+
+
+def _normalize_dbchat_selected_tables(payload: DbChatChatRequest) -> list[DbChatSelectedTable]:
+    selected_tables = list(payload.selectedTables)
+    if payload.selectedTable is not None:
+        selected_tables.append(payload.selectedTable)
+
+    deduped: dict[tuple[str, str, str], DbChatSelectedTable] = {}
+    for selected_table in selected_tables:
+        table_name = selected_table.table.strip()
+        if not table_name:
+            continue
+        normalized = DbChatSelectedTable(
+            database=selected_table.database,
+            schema=selected_table.schema,
+            table=table_name,
+        )
+        deduped[_dbchat_table_key(normalized)] = normalized
+    return list(deduped.values())
+
+
+def _normalize_dbchat_context_mode(value: str | None) -> str:
+    return "lock" if (value or "").strip().lower() == "lock" else "suggest"
+
+
+def _format_dbchat_table_details(adapter: DbChatAdapter, selected_table: DbChatSelectedTable) -> str:
+    details = adapter.describe_table(
+        table=selected_table.table,
+        schema=selected_table.schema,
+        database=selected_table.database,
+    )
+    columns = details.get("columns") if isinstance(details, dict) else []
+    column_lines = []
+    if isinstance(columns, list):
+        for column in columns[:80]:
+            if not isinstance(column, dict):
+                continue
+            name = column.get("name")
+            column_type = column.get("type")
+            nullable = column.get("nullable")
+            nullability = " nullable" if nullable is not False else " not null"
+            column_lines.append(f"- {name}: {column_type}{nullability}")
+    return _dbchat_qualified_table_label(selected_table) + "\nColumns:\n" + ("\n".join(column_lines) or "No columns returned.")
+
+
+def _format_dbchat_catalog_scope(adapter: DbChatAdapter, limit: int = 140) -> str:
     catalog = adapter.catalog(include_system=False)
     tables = catalog.get("tables") if isinstance(catalog, dict) else []
     table_lines = []
     if isinstance(tables, list):
-        for table_record in tables[:80]:
+        for table_record in tables[:limit]:
             if not isinstance(table_record, dict):
                 continue
             qualified = ".".join(
@@ -645,6 +674,20 @@ def _format_dbchat_scope(adapter: DbChatAdapter, selected_table: DbChatSelectedT
                 suffix = " view" if table_record.get("isView") else " table"
                 table_lines.append(f"- {qualified} ({suffix})")
     return "Available tables/views:\n" + ("\n".join(table_lines) or "No tables returned.")
+
+
+def _format_dbchat_scope(adapter: DbChatAdapter, selected_tables: list[DbChatSelectedTable], context_mode: str) -> str:
+    selected_tables = selected_tables[:12]
+    if context_mode == "lock" and selected_tables:
+        sections = ["Locked tables only:"]
+        sections.extend(_format_dbchat_table_details(adapter, table) for table in selected_tables)
+        return "\n\n".join(sections)
+
+    sections = [_format_dbchat_catalog_scope(adapter)]
+    if selected_tables:
+        sections.append("Suggested tables to consider first:")
+        sections.extend(_format_dbchat_table_details(adapter, table) for table in selected_tables)
+    return "\n\n".join(sections)
 
 
 def _dbchat_history_messages(history: list[DbChatMessage]) -> list[HumanMessage | AIMessage]:
@@ -788,6 +831,10 @@ def _dbchat_user_wants_rows(message: str) -> bool:
         keyword in lowered
         for keyword in (
             "show",
+            "count",
+            "total",
+            "average",
+            "sum",
             "preview",
             "sample",
             "records",
@@ -799,9 +846,24 @@ def _dbchat_user_wants_rows(message: str) -> bool:
     )
 
 
-def _dbchat_selected_table_sql(adapter: DbChatAdapter, selected_table: DbChatSelectedTable | None, limit: int = 10) -> str | None:
-    if selected_table is None:
+def _dbchat_user_wants_preview(message: str) -> bool:
+    lowered = message.lower()
+    return any(keyword in lowered for keyword in ("show", "preview", "sample", "records", "rows", "data", "lihat", "tampil"))
+
+
+def _dbchat_user_wants_chart(message: str) -> bool:
+    lowered = message.lower()
+    return any(keyword in lowered for keyword in ("chart", "graph", "plot", "visual", "pie", "bar", "line"))
+
+
+def _dbchat_selected_table_sql(
+    adapter: DbChatAdapter,
+    selected_tables: list[DbChatSelectedTable],
+    limit: int = 10,
+) -> str | None:
+    if not selected_tables:
         return None
+    selected_table = selected_tables[0]
     if isinstance(adapter, SqlAlchemyDbChatAdapter):
         qualified_table = adapter._qualified_table_name(  # noqa: SLF001 - adapter-owned SQL quoting helper
             selected_table.table,
@@ -823,6 +885,129 @@ def _extract_dbchat_sql(text: str) -> str | None:
     if not statement_match:
         return None
     return statement_match.group(0).strip().rstrip(";")
+
+
+def _strip_dbchat_sql_blocks(text: str) -> str:
+    without_blocks = re.sub(r"```sql\s*.*?\s*```", "", text, flags=re.IGNORECASE | re.DOTALL)
+    return re.sub(r"\n{3,}", "\n\n", without_blocks).strip()
+
+
+def _normalize_dbchat_sql_identifier(value: str) -> tuple[str, ...]:
+    stripped = value.strip().strip(";,")
+    if not stripped:
+        return ()
+    parts: list[str] = []
+    for part in re.split(r"\s*\.\s*", stripped):
+        normalized = part.strip().strip('"`[]').lower()
+        if normalized:
+            parts.append(normalized)
+    return tuple(parts)
+
+
+def _dbchat_sql_referenced_tables(sql: str) -> set[tuple[str, ...]]:
+    references: set[tuple[str, ...]] = set()
+    pattern = r"\b(?:from|join)\s+([\w\"`\[\].]+)"
+    for match in re.finditer(pattern, sql, flags=re.IGNORECASE):
+        identifier = _normalize_dbchat_sql_identifier(match.group(1))
+        if identifier:
+            references.add(identifier)
+    return references
+
+
+def _dbchat_allowed_table_identifiers(selected_tables: list[DbChatSelectedTable]) -> set[tuple[str, ...]]:
+    allowed: set[tuple[str, ...]] = set()
+    for selected_table in selected_tables:
+        parts = [part for part in [selected_table.database, selected_table.schema, selected_table.table] if part]
+        normalized = tuple(part.lower() for part in parts)
+        if normalized:
+            allowed.add(normalized)
+            allowed.add((normalized[-1],))
+            if len(normalized) >= 2:
+                allowed.add(normalized[-2:])
+    return allowed
+
+
+def _validate_dbchat_lock_sql(sql: str, selected_tables: list[DbChatSelectedTable]) -> None:
+    if not selected_tables:
+        raise HTTPException(status_code=400, detail="Lock mode needs at least one selected table.")
+    references = _dbchat_sql_referenced_tables(sql)
+    if not references:
+        return
+    allowed = _dbchat_allowed_table_identifiers(selected_tables)
+    blocked = sorted(".".join(reference) for reference in references if reference not in allowed)
+    if blocked:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Lock mode blocked SQL because it referenced tables outside the locked selection: {', '.join(blocked)}",
+        )
+
+
+def _dbchat_float(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            return None
+    return None
+
+
+def _build_dbchat_chart_option(message: str, query_result: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not query_result:
+        return None
+    rows = query_result.get("rows")
+    columns = query_result.get("columns")
+    if not isinstance(rows, list) or not rows or not isinstance(columns, list) or len(columns) < 2:
+        return None
+
+    sample_rows = [row for row in rows if isinstance(row, dict)]
+    if not sample_rows:
+        return None
+
+    label_column = next((column for column in columns if isinstance(column, str)), None)
+    value_column = next(
+        (
+            column
+            for column in columns
+            if isinstance(column, str) and any(_dbchat_float(row.get(column)) is not None for row in sample_rows)
+        ),
+        None,
+    )
+    if not label_column or not value_column:
+        return None
+    if label_column == value_column:
+        label_column = next((column for column in columns if isinstance(column, str) and column != value_column), label_column)
+
+    labels = [str(row.get(label_column, "")) for row in sample_rows[:50]]
+    values = [_dbchat_float(row.get(value_column)) or 0 for row in sample_rows[:50]]
+    lowered = message.lower()
+    title = "Query chart"
+
+    if "pie" in lowered:
+        return {
+            "title": {"text": title, "left": "center"},
+            "tooltip": {"trigger": "item"},
+            "legend": {"bottom": 0},
+            "series": [
+                {
+                    "type": "pie",
+                    "radius": "60%",
+                    "data": [{"name": label, "value": value} for label, value in zip(labels, values, strict=False)],
+                }
+            ],
+        }
+
+    chart_type = "line" if "line" in lowered else "bar"
+    return {
+        "title": {"text": title},
+        "tooltip": {"trigger": "axis"},
+        "xAxis": {"type": "category", "data": labels},
+        "yAxis": {"type": "value"},
+        "series": [{"type": chart_type, "data": values, "name": value_column}],
+    }
 
 
 def _normalize_base64(encoded_value: str) -> str:
@@ -1494,22 +1679,32 @@ async def chat_dbchat_connection(
     payload: DbChatChatRequest,
     user: User = Depends(require_auth),
 ):
-    """Answer DBChat questions using compact schema context and safe read-only result previews."""
+    """Answer DBChat questions and return executed DB artifacts separately from prose."""
     message = payload.message.strip()
     if not message:
         raise HTTPException(status_code=422, detail="message is required")
 
     try:
         adapter = _get_dbchat_adapter(connection_id)
-        scope = _format_dbchat_scope(adapter, payload.selectedTable)
+        selected_tables = _normalize_dbchat_selected_tables(payload)
+        context_mode = _normalize_dbchat_context_mode(payload.contextMode)
+        scope = _format_dbchat_scope(adapter, selected_tables, context_mode)
         model_name = _get_configured_model()
         model = load_chat_model(model_name)
         model = apply_reasoning_effort(model, model_name, _normalize_dbchat_reasoning_effort(payload.reasoningEffort))
+        wants_rows = _dbchat_user_wants_rows(message)
+        wants_chart = _dbchat_user_wants_chart(message)
         system_prompt = (
-            "You are DBChat, a concise data analyst assistant embedded in a SQL workbench. "
-            "Use the provided schema context to answer database questions, suggest safe read-only SQL, "
-            "and explain table relationships when possible. When the user asks to see data, include one fenced SQL block. "
-            "If the schema context is insufficient, say what table or column is needed.\n\n"
+            "You are DBChat, a natural data analyst assistant embedded in a SQL workbench. "
+            "Answer conversationally like a normal chat assistant. Do not make the response formulaic. "
+            "Use the provided schema context to answer database questions and explain table relationships when useful. "
+            "If data must be queried or a chart must be built, append exactly one fenced sql block at the end; "
+            "do not put SQL in the prose and do not include chart JSON. The application will execute safe read-only SQL "
+            "and render query/chart artifacts separately. If the user asks about SQL itself, explain it normally. "
+            "If the schema context is insufficient, say what table or column is needed. "
+            f"Context mode: {context_mode}."
+            + (" In lock mode, use only the locked tables. " if context_mode == "lock" else " Suggested tables are hints only; all listed tables are available. ")
+            + "\n\n"
             f"Connection: {adapter.title} ({adapter.connection_info().get('engineId', 'database')})\n"
             f"Schema context:\n{scope}"
         )
@@ -1520,23 +1715,51 @@ async def chat_dbchat_connection(
                 HumanMessage(content=message[:8000]),
             ]
         )
-        answer = _get_dbchat_visible_message_text(response)
+        visible_answer = _get_dbchat_visible_message_text(response)
+        answer = _strip_dbchat_sql_blocks(visible_answer)
         reasoning = _extract_dbchat_reasoning(response)
-        generated_sql = _dbchat_selected_table_sql(adapter, payload.selectedTable) if _dbchat_user_wants_rows(message) else None
-        generated_sql = generated_sql or _extract_dbchat_sql(answer)
+        generated_sql = (
+            _dbchat_selected_table_sql(adapter, selected_tables)
+            if _dbchat_user_wants_preview(message) and not wants_chart and selected_tables
+            else None
+        )
+        generated_sql = generated_sql or _extract_dbchat_sql(visible_answer)
         query_result: dict[str, Any] | None = None
-        if generated_sql and _is_read_only_dbchat_sql(generated_sql):
+        executed_sql: str | None = None
+        if generated_sql and (wants_rows or wants_chart) and _is_read_only_dbchat_sql(generated_sql):
+            if context_mode == "lock":
+                _validate_dbchat_lock_sql(generated_sql, selected_tables)
             query_result = adapter.query(generated_sql, limit=50)
-        if query_result is not None and _dbchat_user_wants_rows(message):
-            answer = f"Showing the first {query_result.get('rowCount', 0)} rows returned by this read-only query."
+            executed_sql = generated_sql
+        chart_option = _build_dbchat_chart_option(message, query_result) if wants_chart else None
+        tool_events: list[dict[str, Any]] = []
+        if executed_sql and query_result is not None:
+            tool_events.append(
+                {
+                    "type": "sql",
+                    "sql": executed_sql,
+                    "rowCount": query_result.get("rowCount", 0),
+                    "limit": query_result.get("limit", 50),
+                }
+            )
+        if chart_option is not None:
+            tool_events.append({"type": "chart", "chartOption": chart_option})
+        if query_result is not None and wants_rows and not answer:
+            answer = "Here are the rows I found."
+        if chart_option is not None and not answer:
+            answer = "Here is the chart."
         logger.info("DBChat chat completed connection=%s user=%s", connection_id, user.identity)
         return {
             "connectionId": connection_id,
             "response": answer or "I could not produce a DBChat response.",
             "reasoning": reasoning,
-            "generatedSql": generated_sql,
+            "generatedSql": executed_sql,
             "queryResult": query_result,
-            "selectedTable": payload.selectedTable.model_dump() if payload.selectedTable else None,
+            "chartOption": chart_option,
+            "toolEvents": tool_events,
+            "contextMode": context_mode,
+            "selectedTables": [table.model_dump() for table in selected_tables],
+            "selectedTable": selected_tables[0].model_dump() if selected_tables else None,
         }
     except HTTPException:
         raise
