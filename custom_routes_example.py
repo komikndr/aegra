@@ -2014,20 +2014,43 @@ async def analyze_images(
 
 @app.get("/custom/executive-artifacts")
 async def list_executive_artifacts(
-    thread_id: str,
+    thread_id: str | None = None,
+    limit: int = Query(default=250, ge=1, le=500),
     user: User = Depends(require_auth),
     session: AsyncSession = Depends(get_session),
 ):
-    await _get_user_thread(session, thread_id, user)
-    result = await session.scalars(
-        select(ExecutiveArtifact)
-        .where(
-            ExecutiveArtifact.thread_id == thread_id,
-            ExecutiveArtifact.user_id == user.identity,
+    if thread_id:
+        await _get_user_thread(session, thread_id, user)
+        result = await session.scalars(
+            select(ExecutiveArtifact)
+            .where(
+                ExecutiveArtifact.thread_id == thread_id,
+                ExecutiveArtifact.user_id == user.identity,
+            )
+            .order_by(ExecutiveArtifact.created_at.desc())
+            .limit(limit)
         )
-        .order_by(ExecutiveArtifact.created_at.desc())
-    )
-    artifacts = result.all()
+        artifacts = result.all()
+    else:
+        result = await session.execute(
+            select(ExecutiveArtifact, Thread.metadata_json)
+            .join(Thread, Thread.thread_id == ExecutiveArtifact.thread_id)
+            .where(
+                ExecutiveArtifact.user_id == user.identity,
+                Thread.user_id == user.identity,
+            )
+            .order_by(ExecutiveArtifact.created_at.desc())
+            .limit(limit)
+        )
+        artifacts = []
+        for artifact, thread_metadata in result.all():
+            graph_id = thread_metadata.get("graph_id") if isinstance(thread_metadata, dict) else None
+            try:
+                ensure_graph_access(user, graph_id if isinstance(graph_id, str) else None)
+            except HTTPException:
+                continue
+            artifacts.append(artifact)
+
     return {"artifacts": [_serialize_artifact(artifact) for artifact in artifacts]}
 
 
