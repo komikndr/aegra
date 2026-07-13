@@ -1,16 +1,26 @@
 """Health check endpoints"""
 
 import contextlib
+import os
+from urllib.parse import quote_plus
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 from aegra_api import __version__
 from aegra_api.core.database import db_manager
 from aegra_api.models.errors import UNAVAILABLE
 
 router = APIRouter(tags=["Health"])
+
+
+class AnalyticDatabaseHealth(BaseModel):
+    """Configured analytics source status, without connection credentials."""
+
+    status: str = Field(..., description="Analytics source connection status.")
+    engine: str | None = Field(default=None, description="Configured analytics database engine.")
 
 
 class HealthResponse(BaseModel):
@@ -20,6 +30,7 @@ class HealthResponse(BaseModel):
     database: str = Field(..., description="PostgreSQL connection status.")
     langgraph_checkpointer: str = Field(..., description="Checkpoint backend connection status.")
     langgraph_store: str = Field(..., description="Store backend connection status.")
+    analytic_database: AnalyticDatabaseHealth = Field(..., description="Configured analytics database status.")
 
 
 class InfoResponse(BaseModel):
@@ -30,6 +41,58 @@ class InfoResponse(BaseModel):
     description: str = Field(..., description="Service description.")
     status: str = Field(..., description="Current service status.")
     flags: dict = Field(..., description="Feature flags indicating available capabilities.")
+
+
+def _analytic_database_url() -> str | None:
+    database_url = os.environ.get("ANALYTIC_DB_URL", "").strip()
+    if database_url:
+        return database_url
+
+    dialect = os.environ.get("ANALYTIC_DB_DIALECT", "sqlite").strip().lower()
+    database_name = os.environ.get("ANALYTIC_DB_NAME", "").strip()
+    if dialect == "sqlite":
+        if not database_name:
+            return None
+        if database_name == ":memory:":
+            return "sqlite:///:memory:"
+        if database_name.startswith("/"):
+            return f"sqlite:///{database_name}"
+        return f"sqlite:///./{database_name}"
+
+    host = os.environ.get("ANALYTIC_DB_HOST", "").strip()
+    user = os.environ.get("ANALYTIC_DB_USER", "").strip()
+    if not all([host, database_name, user]):
+        return None
+
+    password = os.environ.get("ANALYTIC_DB_PASSWORD", "").strip()
+    port = os.environ.get("ANALYTIC_DB_PORT", "").strip()
+    driver = "postgresql+psycopg" if dialect in {"postgres", "postgresql"} else dialect
+    credentials = quote_plus(user) if not password else f"{quote_plus(user)}:{quote_plus(password)}"
+    return f"{driver}://{credentials}@{host}{f':{port}' if port else ''}/{database_name}"
+
+
+def _analytic_database_health() -> AnalyticDatabaseHealth:
+    database_url = _analytic_database_url()
+    if not database_url:
+        return AnalyticDatabaseHealth(status="not_configured")
+
+    try:
+        url = make_url(database_url)
+        engine_name = url.get_backend_name()
+    except Exception:
+        return AnalyticDatabaseHealth(status="unavailable")
+
+    try:
+        engine = create_engine(url, future=True)
+        try:
+            probe = "SELECT 1 FROM DUAL" if engine_name == "oracle" else "SELECT 1"
+            with engine.connect() as connection:
+                connection.execute(text(probe))
+        finally:
+            engine.dispose()
+        return AnalyticDatabaseHealth(status="connected", engine=engine_name)
+    except Exception:
+        return AnalyticDatabaseHealth(status="unavailable", engine=engine_name)
 
 
 @router.get("/info", response_model=InfoResponse)
@@ -61,6 +124,7 @@ async def health_check(_request: Request) -> HealthResponse:
         "langgraph_checkpointer": "unknown",
         "langgraph_store": "unknown",
     }
+    analytic_database = _analytic_database_health()
 
     # Database connectivity
     try:
@@ -99,7 +163,7 @@ async def health_check(_request: Request) -> HealthResponse:
     if health_status["status"] == "unhealthy":
         raise HTTPException(status_code=503, detail="Service unhealthy")
 
-    return HealthResponse(**health_status)
+    return HealthResponse(**health_status, analytic_database=analytic_database)
 
 
 @router.get("/ready", responses={**UNAVAILABLE})

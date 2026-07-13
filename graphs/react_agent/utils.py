@@ -19,6 +19,7 @@ from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolM
 _MODEL_CACHE_TTL_SECONDS = 10.0
 _active_model_cache: dict[str, tuple[float, str | None]] = {}
 _vllm_base_url_cache: dict[str, tuple[float, bool]] = {}
+_llamacpp_base_url_cache: dict[str, tuple[float, bool]] = {}
 _OPENAI_REASONING_PATCHED = False
 _REASONING_BUDGET_TOKENS = {
     "none": 0,
@@ -80,6 +81,18 @@ def _payload_looks_like_vllm(payload: dict[str, Any]) -> bool:
     return False
 
 
+def _payload_looks_like_llamacpp(payload: dict[str, Any]) -> bool:
+    data = payload.get("data")
+    if isinstance(data, list):
+        for model in data:
+            if not isinstance(model, dict):
+                continue
+            owner = str(model.get("owned_by", "")).lower().replace(".", "").replace("_", "")
+            if owner == "llamacpp":
+                return True
+    return False
+
+
 def _fetch_models_payload(base_url: str, api_key: str | None = None) -> dict[str, Any] | None:
     request = urllib.request.Request(
         f"{base_url.rstrip('/')}/models",
@@ -136,6 +149,22 @@ def is_vllm_base_url(base_url: str | None = None, api_key: str | None = None) ->
     is_vllm = _payload_looks_like_vllm(parsed) if parsed else False
     _vllm_base_url_cache[resolved_base_url] = (now, is_vllm)
     return is_vllm
+
+
+def is_llamacpp_base_url(base_url: str | None = None, api_key: str | None = None) -> bool:
+    resolved_base_url = (base_url or os.environ.get("VLLM_BASE_URL") or os.environ.get("OPENAI_BASE_URL") or "").strip()
+    if not resolved_base_url:
+        return False
+
+    now = time.time()
+    cached = _llamacpp_base_url_cache.get(resolved_base_url)
+    if cached and now - cached[0] < _MODEL_CACHE_TTL_SECONDS:
+        return cached[1]
+
+    parsed = _fetch_models_payload(resolved_base_url, api_key=api_key)
+    is_llamacpp = _payload_looks_like_llamacpp(parsed) if parsed else False
+    _llamacpp_base_url_cache[resolved_base_url] = (now, is_llamacpp)
+    return is_llamacpp
 
 
 def resolve_model_name(
@@ -251,6 +280,8 @@ def _patch_openai_reasoning_conversion() -> None:
 
 def normalize_reasoning_effort(reasoning_effort: str | None) -> str:
     normalized = (reasoning_effort or "low").strip().lower()
+    if normalized == "instant":
+        return "none"
     if normalized in _REASONING_BUDGET_TOKENS:
         return normalized
     return "low"
@@ -290,6 +321,17 @@ def _reasoning_model_kwargs(
                 "chat_template_kwargs": {"enable_thinking": True},
             }
         }
+
+    if provider in {"openai", "vllm"} and is_llamacpp_base_url(openai_base_url, api_key=api_key):
+        budget = _REASONING_BUDGET_TOKENS[effort]
+        body: dict[str, Any] = {
+            "chat_template_kwargs": {"enable_thinking": effort != "none"},
+        }
+        if effort != "none":
+            # llama.cpp versions use either name for per-request thinking budgets.
+            body["reasoning_budget_tokens"] = budget
+            body["thinking_budget_tokens"] = budget
+        return {"extra_body": body}
 
     if effort == "none":
         return {}
