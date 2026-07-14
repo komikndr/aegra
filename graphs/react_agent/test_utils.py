@@ -43,3 +43,17 @@ def test_llamacpp_reasoning_mode_enables_thinking_with_budget(monkeypatch: pytes
             "thinking_budget_tokens": 1024,
         }
     }
+
+
+def test_llamacpp_ultra_reasoning_uses_sixteen_thousand_token_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(utils, "is_vllm_base_url", lambda *args, **kwargs: False)
+    monkeypatch.setattr(utils, "is_llamacpp_base_url", lambda *args, **kwargs: True)
+
+    result = utils._reasoning_model_kwargs(
+        "openai/model",
+        "ultra",
+        base_url="http://llamacpp.test/v1",
+    )
+
+    assert result["extra_body"]["reasoning_budget_tokens"] == 16384
+    assert result["extra_body"]["thinking_budget_tokens"] == 16384

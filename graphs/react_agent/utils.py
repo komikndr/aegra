@@ -26,7 +26,7 @@ _REASONING_BUDGET_TOKENS = {
     "low": 512,
     "medium": 1024,
     "high": 4096,
-    "ultra": 12288,
+    "ultra": 16384,
 }
 _VLLM_REASONING_BUDGET_TOKENS = {
     "none": 0,
