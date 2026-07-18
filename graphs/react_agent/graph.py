@@ -16,6 +16,7 @@ from react_agent.context import Context
 from react_agent.state import InputState, State
 from react_agent.tools import TOOLS
 from react_agent.utils import (
+    bind_tools_with_parallel,
     build_system_prompt_messages,
     build_token_limited_messages,
     is_media_not_supported_error,
@@ -38,7 +39,7 @@ async def call_model(state: State, runtime: Runtime[Context]) -> dict[str, list[
         dict: A dictionary containing the model's response message.
     """
     # Initialize the model with tool binding. Change the model or add more tools here.
-    model = load_chat_model(runtime.context.model).bind_tools(TOOLS)
+    model = bind_tools_with_parallel(load_chat_model(runtime.context.model), TOOLS)
 
     # Format the system prompt. Customize this to change the agent's behavior.
     system_messages = build_system_prompt_messages(

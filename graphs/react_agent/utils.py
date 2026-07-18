@@ -8,13 +8,15 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from math import ceil
 from typing import Any
 
 from langchain.chat_models import init_chat_model
-from langchain_core.language_models import BaseChatModel
+from langchain_core.language_models import BaseChatModel, LanguageModelInput
 from langchain_core.messages import AIMessage, BaseMessage, SystemMessage, ToolMessage
+from langchain_core.runnables import Runnable
+from langchain_core.tools import BaseTool
 
 _MODEL_CACHE_TTL_SECONDS = 10.0
 _active_model_cache: dict[str, tuple[float, str | None]] = {}
@@ -620,6 +622,9 @@ def is_media_not_supported_error(error: Exception) -> bool:
     return any(term in message for term in media_terms) and any(term in message for term in unsupported_terms)
 
 
-def is_tool_choice_not_supported_error(error: Exception) -> bool:
-    message = str(error).lower()
-    return "auto" in message and "tool choice" in message and "tool-call-parser" in message
+def bind_tools_with_parallel(
+    model: BaseChatModel,
+    tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+) -> Runnable[LanguageModelInput, AIMessage]:
+    """Bind tools to a model with explicit parallel_tool_calls=True."""
+    return model.bind_tools(tools, parallel_tool_calls=True)

@@ -2,12 +2,14 @@
 
 from langchain_core.messages import BaseMessage
 from react_agent.utils import (
+    bind_tools_with_parallel,
     build_token_limited_messages,
     is_media_not_supported_error,
     load_chat_model,
 )
 
 __all__ = [
+    "bind_tools_with_parallel",
     "get_message_text",
     "build_token_limited_messages",
     "is_media_not_supported_error",

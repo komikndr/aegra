@@ -15,13 +15,12 @@ from react_agent.state import InputState, State
 from react_agent.tools import TOOLS
 from react_agent.utils import (
     apply_reasoning_effort,
+    bind_tools_with_parallel,
     build_reasoning_storage_update,
     build_system_prompt_messages,
     build_token_limited_messages,
     get_message_text,
     is_media_not_supported_error,
-    is_tool_choice_not_supported_error,
-    is_vllm_base_url,
     load_chat_model,
 )
 
@@ -85,17 +84,9 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, o
         min_recent_messages=runtime.context.num_limit_min_recent_messages,
     )
     base_model = load_chat_model(model_config.model, base_url=model_config.base_url, api_key=model_config.api_key)
-    vllm_without_tool_parser = is_vllm_base_url(model_config.base_url, api_key=model_config.api_key)
-    model = base_model if vllm_without_tool_parser else base_model.bind_tools(TOOLS)
+    model = bind_tools_with_parallel(base_model, TOOLS)
     model = apply_reasoning_effort(
         model,
-        model_config.model,
-        runtime.context.reasoning_effort,
-        base_url=model_config.base_url,
-        api_key=model_config.api_key,
-    )
-    fallback_model = apply_reasoning_effort(
-        base_model,
         model_config.model,
         runtime.context.reasoning_effort,
         base_url=model_config.base_url,
@@ -128,8 +119,6 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, o
     except Exception as error:
         if is_media_not_supported_error(error):
             response = AIMessage(content="Sorry, the model do not have image capability.")
-        elif is_tool_choice_not_supported_error(error):
-            response = cast("AIMessage", await fallback_model.ainvoke(model_messages))
         else:
             raise
 
