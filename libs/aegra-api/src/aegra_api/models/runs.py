@@ -1,5 +1,6 @@
 """Run-related Pydantic models for Agent Protocol"""
 
+import re
 from datetime import datetime
 from typing import Any, Literal, Self
 
@@ -12,6 +13,10 @@ from pydantic import (
 )
 
 from aegra_api.utils.status_compat import validate_run_status
+
+_METADATA_KEY_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_METADATA_MAX_KEYS = 32
+_METADATA_MAX_VALUE_LEN = 512
 
 
 class RunCreate(BaseModel):
@@ -67,25 +72,44 @@ class RunCreate(BaseModel):
     # Request metadata (top-level in payload)
     metadata: dict[str, Any] | None = Field(
         None,
-        description="Request metadata (e.g., from_studio flag)",
+        description=(
+            "Primitive request metadata propagated to OTEL trace attributes. "
+            "Keys must match [A-Za-z0-9_-]{1,64}; strings are limited to 512 "
+            "characters; at most 32 keys are accepted."
+        ),
     )
+
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def validate_metadata_shape(cls, metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Bound request metadata before it reaches tracing backends."""
+        if metadata is None:
+            return None
+        if len(metadata) > _METADATA_MAX_KEYS:
+            raise ValueError(f"metadata exceeds {_METADATA_MAX_KEYS} keys (got {len(metadata)})")
+        for key, value in metadata.items():
+            if _METADATA_KEY_RE.fullmatch(key) is None:
+                raise ValueError(f"metadata key {key!r} must match {_METADATA_KEY_RE.pattern}")
+            if not isinstance(value, (str, int, float, bool)):
+                raise ValueError(
+                    f"metadata value for key {key!r} must be str/int/float/bool, got {type(value).__name__}"
+                )
+            if isinstance(value, str) and len(value) > _METADATA_MAX_VALUE_LEN:
+                raise ValueError(f"metadata value for key {key!r} exceeds {_METADATA_MAX_VALUE_LEN} characters")
+        return metadata
 
     @model_validator(mode="after")
     def validate_input_command_exclusivity(self) -> Self:
-        """Ensure input and command are mutually exclusive"""
-        # Allow empty input dict when command is present (frontend compatibility)
+        """Ensure input and command are mutually exclusive."""
+        # Empty input dict alongside command: drop it for frontend compatibility.
         if self.input is not None and self.command is not None:
-            # If input is just an empty dict, treat it as None for compatibility
             if self.input == {}:
                 self.input = None
             else:
                 raise ValueError("Cannot specify both 'input' and 'command' - they are mutually exclusive")
-        if self.input is None and self.command is None:
-            if self.checkpoint is not None:
-                # Allow checkpoint-only requests by treating input as empty dict
-                self.input = {}
-            else:
-                raise ValueError("Must specify either 'input' or 'command'")
+        # Preserve None so checkpoint-only requests resume instead of restarting.
+        if self.input is None and self.command is None and self.checkpoint is None:
+            raise ValueError("Must specify at least one of 'input', 'command', or 'checkpoint'")
         return self
 
 
@@ -103,7 +127,9 @@ class Run(BaseModel):
     status: str = Field(
         "pending", description="Current run status: pending, running, error, success, timeout, or interrupted."
     )
-    input: dict[str, Any] = Field(..., description="Input data provided to the run.")
+    input: dict[str, Any] | None = Field(
+        None, description="Input data provided to the run. None for checkpoint-only resume."
+    )
     output: dict[str, Any] | None = Field(
         None, description="Final output produced by the run, or null if not yet complete."
     )

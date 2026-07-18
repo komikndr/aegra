@@ -1,6 +1,5 @@
 """Unit tests for auth middleware"""
 
-import os
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 
@@ -137,10 +136,9 @@ class TestLangGraphAuthBackend:
             patch("pathlib.Path.exists", return_value=True),
             patch("pathlib.Path.cwd", return_value=Path("/test")),
             patch("importlib.util.spec_from_file_location", return_value=None),
+            pytest.raises(RuntimeError, match="Failed to load configured auth"),
         ):
-            backend = LangGraphAuthBackend()
-
-            assert backend.auth_instance is None
+            LangGraphAuthBackend()
 
     def test_load_auth_instance_no_auth_attribute(self):
         """Test auth instance loading when module has no auth attribute"""
@@ -157,9 +155,8 @@ class TestLangGraphAuthBackend:
             mock_spec.return_value = Mock()
             mock_spec.return_value.loader = Mock()
 
-            backend = LangGraphAuthBackend()
-
-            assert backend.auth_instance is None
+            with pytest.raises(RuntimeError, match="Failed to load configured auth"):
+                LangGraphAuthBackend()
 
     def test_load_auth_instance_invalid_auth_type(self):
         """Test auth instance loading when auth is not Auth instance"""
@@ -176,9 +173,8 @@ class TestLangGraphAuthBackend:
             mock_spec.return_value = Mock()
             mock_spec.return_value.loader = Mock()
 
-            backend = LangGraphAuthBackend()
-
-            assert backend.auth_instance is None
+            with pytest.raises(RuntimeError, match="Failed to load configured auth"):
+                LangGraphAuthBackend()
 
     def test_load_auth_instance_exception(self):
         """Test auth instance loading when exception occurs - returns None, noop handled in authenticate()"""
@@ -191,11 +187,9 @@ class TestLangGraphAuthBackend:
             ),
             patch("pathlib.Path.exists", return_value=False),  # Fallback also finds nothing
             patch("pathlib.Path.cwd", return_value=Path("/test")),
+            pytest.raises(Exception, match="Test config error"),
         ):
-            backend = LangGraphAuthBackend()
-
-            # Should return None (noop handled directly in authenticate method)
-            assert backend.auth_instance is None
+            LangGraphAuthBackend()
 
     @pytest.mark.asyncio
     async def test_authenticate_noop_when_no_auth_instance(self):
@@ -218,24 +212,14 @@ class TestLangGraphAuthBackend:
             assert isinstance(credentials, AuthCredentials)
 
     @pytest.mark.asyncio
-    async def test_authenticate_no_auth_instance_defaults_to_noop(self):
-        """Test that no auth instance defaults to noop (anonymous) regardless of AUTH_TYPE"""
-        backend = LangGraphAuthBackend()
-        backend.auth_instance = None
-
-        mock_conn = Mock(spec=HTTPConnection)
-        mock_conn.headers = {}
-
-        # Test with AUTH_TYPE=custom - should still default to noop
-        with patch("aegra_api.core.auth_middleware.settings") as mock_settings:
+    async def test_custom_auth_without_config_fails_closed(self):
+        with (
+            patch("aegra_api.core.auth_middleware.load_auth_config", return_value=None),
+            patch("aegra_api.core.auth_middleware.settings") as mock_settings,
+        ):
             mock_settings.app.AUTH_TYPE = "custom"
-            result = await backend.authenticate(mock_conn)
-
-            # Should return anonymous user even when AUTH_TYPE=custom
-            assert result is not None
-            credentials, user = result
-            assert user.identity == "anonymous"
-            assert user.display_name == "Anonymous User"
+            with pytest.raises(RuntimeError, match="requires an auth.path"):
+                LangGraphAuthBackend()
 
     @pytest.mark.asyncio
     async def test_authenticate_no_handler(self):
@@ -248,9 +232,8 @@ class TestLangGraphAuthBackend:
 
         mock_conn = Mock(spec=HTTPConnection)
 
-        result = await backend.authenticate(mock_conn)
-
-        assert result is None
+        with pytest.raises(AuthenticationError, match="not configured"):
+            await backend.authenticate(mock_conn)
 
     @pytest.mark.asyncio
     async def test_authenticate_success(self):
@@ -384,25 +367,44 @@ class TestGetAuthBackend:
 
     def test_get_auth_backend_noop(self):
         """Test getting auth backend with noop type"""
-        with patch.dict(os.environ, {"AUTH_TYPE": "noop"}):
+        get_auth_backend.cache_clear()
+        with (
+            patch("aegra_api.core.auth_middleware.settings") as mock_settings,
+            patch.object(LangGraphAuthBackend, "_load_auth_instance", return_value=None),
+        ):
+            mock_settings.app.AUTH_TYPE = "noop"
             backend = get_auth_backend()
             assert isinstance(backend, LangGraphAuthBackend)
 
     def test_get_auth_backend_custom(self):
         """Test getting auth backend with custom type"""
-        with patch.dict(os.environ, {"AUTH_TYPE": "custom"}):
+        get_auth_backend.cache_clear()
+        mock_auth = Mock()
+        mock_auth._authenticate_handler = AsyncMock()
+        with (
+            patch("aegra_api.core.auth_middleware.settings") as mock_settings,
+            patch.object(LangGraphAuthBackend, "_load_auth_instance", return_value=mock_auth),
+        ):
+            mock_settings.app.AUTH_TYPE = "custom"
             backend = get_auth_backend()
             assert isinstance(backend, LangGraphAuthBackend)
 
     def test_get_auth_backend_unknown(self):
         """Test getting auth backend with unknown type"""
-        with patch.dict(os.environ, {"AUTH_TYPE": "unknown"}):
-            backend = get_auth_backend()
-            assert isinstance(backend, LangGraphAuthBackend)
+        get_auth_backend.cache_clear()
+        with patch("aegra_api.core.auth_middleware.settings") as mock_settings:
+            mock_settings.app.AUTH_TYPE = "unknown"
+            with pytest.raises(RuntimeError, match="Unsupported AUTH_TYPE"):
+                get_auth_backend()
 
     def test_get_auth_backend_default(self):
         """Test getting auth backend with no AUTH_TYPE set"""
-        with patch.dict(os.environ, {}, clear=True):
+        get_auth_backend.cache_clear()
+        with (
+            patch("aegra_api.core.auth_middleware.settings") as mock_settings,
+            patch.object(LangGraphAuthBackend, "_load_auth_instance", return_value=None),
+        ):
+            mock_settings.app.AUTH_TYPE = "noop"
             backend = get_auth_backend()
             assert isinstance(backend, LangGraphAuthBackend)
 

@@ -37,6 +37,7 @@ from aegra_api.models import (
 from aegra_api.models.errors import CONFLICT, NOT_FOUND
 from aegra_api.services.streaming_service import streaming_service
 from aegra_api.services.thread_state_service import ThreadStateService
+from aegra_api.utils.run_utils import strip_pinned_config_keys
 
 router = APIRouter(tags=["Threads"], dependencies=auth_dependency)
 logger = structlog.getLogger(__name__)
@@ -450,11 +451,13 @@ async def update_thread_state(
 
     When `values` is provided, creates a new checkpoint with the updated state.
     Use `as_node` to attribute the update to a specific graph node. When
-    `values` is null, this endpoint acts as a POST-based alternative to the
-    GET state endpoint (useful when passing complex checkpoint/subgraph
-    parameters in the request body).
+    `values` is null and no checkpoint target or node is provided, this endpoint
+    acts as a POST-based alternative to the GET state endpoint.
+
+    A null `values` payload with `as_node` or a checkpoint target creates a new
+    checkpoint derived from that target, which supports Studio's fork flow.
     """
-    if request.values is None:
+    if request.values is None and request.as_node is None and request.checkpoint_id is None and not request.checkpoint:
         return await get_thread_state(
             thread_id=thread_id,
             subgraphs=request.subgraphs or False,
@@ -489,7 +492,7 @@ async def update_thread_state(
         if request.checkpoint_id:
             config["configurable"]["checkpoint_id"] = request.checkpoint_id
         if request.checkpoint:
-            config["configurable"].update(request.checkpoint)
+            config["configurable"].update(strip_pinned_config_keys(request.checkpoint))
         if request.checkpoint_ns:
             config["configurable"]["checkpoint_ns"] = request.checkpoint_ns
 
@@ -734,7 +737,7 @@ async def get_thread_history_post(
 
         config: dict[str, Any] = create_thread_config(thread_id, user)
         if checkpoint:
-            cfg_cp = checkpoint.copy()
+            cfg_cp = strip_pinned_config_keys(checkpoint)
             if checkpoint_ns is not None:
                 cfg_cp.setdefault("checkpoint_ns", checkpoint_ns)
             config["configurable"].update(cfg_cp)

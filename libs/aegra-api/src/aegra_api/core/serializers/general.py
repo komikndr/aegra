@@ -1,5 +1,6 @@
 """General-purpose object serialization for complex objects"""
 
+import inspect
 from typing import Any
 
 from aegra_api.core.serializers.base import SerializationError, Serializer
@@ -17,6 +18,10 @@ class GeneralSerializer(Serializer):
 
     def _serialize_object(self, obj: Any) -> Any:
         """Core serialization logic for Python objects"""
+        # Pydantic classes expose model_dump but require an instance.
+        if inspect.isclass(obj):
+            return f"{obj.__module__}.{obj.__qualname__}"
+
         # Handle Pydantic v2 models (model_dump method)
         if hasattr(obj, "model_dump") and callable(obj.model_dump):
             return obj.model_dump()

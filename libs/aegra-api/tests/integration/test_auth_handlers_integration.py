@@ -71,6 +71,8 @@ async def allow_assistant_create(ctx, value):
     @pytest.fixture
     def aegra_config_with_auth_handlers(self, tmp_path, mock_auth_file, monkeypatch):
         """Create aegra.json with auth.path pointing to mock auth with handlers"""
+        from aegra_api.core.auth_middleware import get_auth_backend
+
         monkeypatch.chdir(tmp_path)
 
         config_file = tmp_path / "aegra.json"
@@ -78,11 +80,14 @@ async def allow_assistant_create(ctx, value):
             json.dumps(
                 {
                     "graphs": {"test": "./test.py:graph"},
+                    "graph_access": {"test": []},
                     "auth": {"path": f"./{mock_auth_file.name}:auth"},
                 }
             )
         )
-        return config_file
+        get_auth_backend.cache_clear()
+        yield config_file
+        get_auth_backend.cache_clear()
 
     def test_load_auth_with_handlers(self, aegra_config_with_auth_handlers, mock_auth_file):
         """Test that auth with handlers loads successfully"""

@@ -54,7 +54,7 @@ class TestLangGraphServiceConfig:
     @pytest.mark.asyncio
     async def test_initialize_env_var_override(self):
         """Test config loading with AEGRA_CONFIG env var"""
-        config_data = {"graphs": {"test": "./graphs/test.py:graph"}}
+        config_data = {"graphs": {"test": "./graphs/test.py:graph"}, "graph_access": {"test": []}}
         env_path = "/env/path/config.json"
 
         # Patch the settings object directly. This ensures the service sees the change
@@ -75,7 +75,7 @@ class TestLangGraphServiceConfig:
     @pytest.mark.asyncio
     async def test_initialize_explicit_path_exists(self):
         """Test config loading with existing explicit path"""
-        config_data = {"graphs": {"test": "./graphs/test.py:graph"}}
+        config_data = {"graphs": {"test": "./graphs/test.py:graph"}, "graph_access": {"test": []}}
 
         # Even if config is set, explicit path (arg) should win
         with (
@@ -93,7 +93,7 @@ class TestLangGraphServiceConfig:
     @pytest.mark.asyncio
     async def test_initialize_aegra_json_fallback(self):
         """Test config loading with aegra.json fallback"""
-        config_data = {"graphs": {"test": "./graphs/test.py:graph"}}
+        config_data = {"graphs": {"test": "./graphs/test.py:graph"}, "graph_access": {"test": []}}
 
         # Ensure AEGRA_CONFIG is None so it falls back to default
         with (
@@ -112,7 +112,7 @@ class TestLangGraphServiceConfig:
     @pytest.mark.asyncio
     async def test_initialize_langgraph_json_fallback(self):
         """Test config loading with langgraph.json fallback"""
-        config_data = {"graphs": {"test": "./graphs/test.py:graph"}}
+        config_data = {"graphs": {"test": "./graphs/test.py:graph"}, "graph_access": {"test": []}}
 
         # Ensure AEGRA_CONFIG is None
         with (
@@ -599,6 +599,27 @@ class TestLangGraphServiceContext:
         assert result["configurable"]["existing_key"] == "existing_value"
         assert result["configurable"]["user_id"] == "user-123"
 
+    def test_inject_user_context_overwrites_client_identity(self):
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+        mock_user.to_dict.return_value = {"identity": "user-123"}
+
+        result = inject_user_context(
+            mock_user,
+            {
+                "configurable": {
+                    "user_id": "victim",
+                    "user_display_name": "Victim",
+                    "langgraph_auth_user": {"identity": "victim"},
+                }
+            },
+        )
+
+        assert result["configurable"]["user_id"] == "user-123"
+        assert result["configurable"]["user_display_name"] == "Test User"
+        assert result["configurable"]["langgraph_auth_user"] == {"identity": "user-123"}
+
 
 class TestLangGraphServiceConfigs:
     """Test thread and run config creation"""
@@ -632,6 +653,20 @@ class TestLangGraphServiceConfigs:
 
         assert result["configurable"]["thread_id"] == thread_id
         assert result["configurable"]["user_id"] == "user-123"
+
+    def test_create_thread_config_overwrites_client_thread_id(self):
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+        mock_user.to_dict.return_value = {"identity": "user-123"}
+
+        result = create_thread_config(
+            "thread-456",
+            mock_user,
+            additional_config={"configurable": {"thread_id": "victim-thread"}},
+        )
+
+        assert result["configurable"]["thread_id"] == "thread-456"
 
     def test_create_run_config(self):
         """Test creating run configuration"""
@@ -673,6 +708,41 @@ class TestLangGraphServiceConfigs:
             result = create_run_config(run_id, thread_id, mock_user, checkpoint=checkpoint)
 
         assert result["configurable"]["checkpoint_key"] == "checkpoint_value"
+
+    def test_create_run_config_overwrites_client_routing_and_identity(self):
+        mock_user = Mock()
+        mock_user.identity = "user-123"
+        mock_user.display_name = "Test User"
+        mock_user.to_dict.return_value = {"identity": "user-123"}
+        additional_config = {
+            "run_id": "victim-root-run",
+            "configurable": {
+                "thread_id": "victim-thread",
+                "run_id": "victim-run",
+                "user_id": "victim-user",
+            },
+        }
+        checkpoint = {
+            "thread_id": "checkpoint-victim-thread",
+            "run_id": "checkpoint-victim-run",
+            "user_id": "checkpoint-victim-user",
+            "checkpoint_id": "checkpoint-1",
+        }
+
+        with patch("aegra_api.services.langgraph_service.get_tracing_callbacks", return_value=[]):
+            result = create_run_config(
+                "run-789",
+                "thread-456",
+                mock_user,
+                additional_config=additional_config,
+                checkpoint=checkpoint,
+            )
+
+        assert result["run_id"] == "run-789"
+        assert result["configurable"]["thread_id"] == "thread-456"
+        assert result["configurable"]["run_id"] == "run-789"
+        assert result["configurable"]["user_id"] == "user-123"
+        assert result["configurable"]["checkpoint_id"] == "checkpoint-1"
 
     def test_create_run_config_with_tracing_callbacks(self):
         """Test creating run config with tracing callbacks"""

@@ -2,15 +2,54 @@
 
 import json
 import re
-from collections.abc import Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
+from sse_starlette import EventSourceResponse, ServerSentEvent
+
 from aegra_api.core.serializers import GeneralSerializer
+from aegra_api.settings import settings
 
 # Global serializer instance
 _serializer = GeneralSerializer()
+_HEARTBEAT_EVENT = ServerSentEvent(comment="heartbeat")
+
+
+def heartbeat_factory() -> ServerSentEvent:
+    """Return the shared SSE heartbeat comment."""
+    return _HEARTBEAT_EVENT
+
+
+async def sse_to_bytes(inner: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    """Pass preformatted SSE messages through EventSourceResponse unchanged."""
+    try:
+        async for chunk in inner:
+            yield chunk.encode("utf-8")
+    finally:
+        aclose = getattr(inner, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+
+def make_sse_response(
+    body: AsyncIterator[bytes],
+    *,
+    headers: Mapping[str, str],
+    close_handler: Callable[[MutableMapping[str, Any]], Awaitable[None]] | None = None,
+    status_code: int = 200,
+) -> EventSourceResponse:
+    """Construct an SSE response with consistent heartbeat behavior."""
+    return EventSourceResponse(
+        body,
+        status_code=status_code,
+        ping=settings.app.sse_ping_interval_secs,
+        ping_message_factory=heartbeat_factory,
+        client_close_handler_callable=close_handler,
+        headers=dict(headers),
+    )
+
 
 # Some LLMs stream tool_call_chunks.args with literal \uXXXX sequences
 # instead of actual Unicode characters. After json.dumps these become \\uXXXX (double-escaped).

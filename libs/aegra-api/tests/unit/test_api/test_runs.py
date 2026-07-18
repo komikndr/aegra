@@ -16,6 +16,12 @@ from aegra_api.models import Run, RunCreate, RunStatus, User
 class TestRunsEndpoints:
     """Test standard run endpoints."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_graph_access(self):
+        """Keep endpoint tests focused on run behavior, not graph policy."""
+        with patch("aegra_api.services.run_preparation.ensure_graph_access"):
+            yield
+
     @pytest.fixture
     def mock_user(self) -> User:
         return User(identity="test-user", scopes=[])
@@ -68,8 +74,7 @@ class TestRunsEndpoints:
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
 
-            # DB setup
-            mock_session.scalar.return_value = sample_assistant
+            mock_session.scalar.side_effect = [None, sample_assistant]
 
             result = await create_run(thread_id, request, mock_user, mock_session)
 
@@ -128,7 +133,7 @@ class TestRunsEndpoints:
             # Graph not in available graphs
             mock_lg_service.return_value.list_graphs.return_value = ["other-graph"]
 
-            mock_session.scalar.return_value = sample_assistant
+            mock_session.scalar.side_effect = [None, sample_assistant]
 
             with pytest.raises(HTTPException) as exc:
                 await create_run(thread_id, request, mock_user, mock_session)

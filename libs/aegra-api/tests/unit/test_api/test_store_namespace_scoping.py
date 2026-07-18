@@ -1,5 +1,8 @@
 """Tests for store namespace scoping / user isolation."""
 
+import pytest
+from fastapi import HTTPException
+
 from aegra_api.api.store import apply_user_namespace_scoping
 
 
@@ -20,18 +23,19 @@ class TestApplyUserNamespaceScoping:
         result = apply_user_namespace_scoping("user-123", ns)
         assert result == ["users", "user-123"]
 
-    def test_other_user_namespace_is_scoped(self) -> None:
-        """A user cannot access another user's namespace — it gets remapped."""
+    def test_other_user_namespace_is_rejected(self) -> None:
+        """A user cannot access another user's namespace."""
         ns = ["users", "victim-456", "secrets"]
-        result = apply_user_namespace_scoping("user-123", ns)
-        assert result == ["users", "user-123", "users", "victim-456", "secrets"]
-        assert result != ns
+        with pytest.raises(HTTPException) as exc_info:
+            apply_user_namespace_scoping("user-123", ns)
+        assert exc_info.value.status_code == 403
 
     def test_other_user_namespace_no_passthrough(self) -> None:
-        """Ensure attacker-supplied namespace for another user is never returned as-is."""
+        """Reject an attacker-supplied namespace for another user."""
         ns = ["users", "victim-456"]
-        result = apply_user_namespace_scoping("user-123", ns)
-        assert result[1] == "user-123"
+        with pytest.raises(HTTPException) as exc_info:
+            apply_user_namespace_scoping("user-123", ns)
+        assert exc_info.value.status_code == 403
 
     def test_arbitrary_namespace_is_scoped_under_user(self) -> None:
         """Non-user namespaces get prefixed with the caller's user scope."""
@@ -44,16 +48,18 @@ class TestApplyUserNamespaceScoping:
         result = apply_user_namespace_scoping("user-123", ns)
         assert result == ["users", "user-123", "configs"]
 
-    def test_users_prefix_without_id_is_scoped(self) -> None:
-        """["users"] alone (no user_id) should be scoped, not passed through."""
+    def test_users_prefix_without_id_is_rejected(self) -> None:
+        """Reject an incomplete explicit user namespace."""
         ns = ["users"]
-        result = apply_user_namespace_scoping("user-123", ns)
-        assert result == ["users", "user-123", "users"]
+        with pytest.raises(HTTPException) as exc_info:
+            apply_user_namespace_scoping("user-123", ns)
+        assert exc_info.value.status_code == 403
 
-    def test_users_prefix_with_wrong_id_is_scoped(self) -> None:
+    def test_users_prefix_with_wrong_id_is_rejected(self) -> None:
         ns = ["users", "other-user"]
-        result = apply_user_namespace_scoping("user-123", ns)
-        assert result[1] == "user-123"
+        with pytest.raises(HTTPException) as exc_info:
+            apply_user_namespace_scoping("user-123", ns)
+        assert exc_info.value.status_code == 403
 
     def test_deeply_nested_own_namespace(self) -> None:
         ns = ["users", "user-123", "a", "b", "c"]

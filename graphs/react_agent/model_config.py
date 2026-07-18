@@ -90,6 +90,14 @@ def _agent_entry(config: dict[str, Any], agent_id: str | None) -> dict[str, Any]
     return value if isinstance(value, dict) else {}
 
 
+def _pipeline_model_entry(config: dict[str, Any], model_id: str) -> dict[str, Any]:
+    models = config.get("pipeline_models")
+    if not isinstance(models, dict):
+        return {}
+    value = models.get(model_id)
+    return value if isinstance(value, dict) else {}
+
+
 def _optional_string(*values: Any) -> str | None:
     for value in values:
         if isinstance(value, str) and value.strip():
@@ -155,4 +163,42 @@ def resolve_agent_model(
         min_recent_messages=_optional_int(
             agent.get("min_recent_messages"), default.get("min_recent_messages"), min_recent_messages
         ),
+    )
+
+
+def list_pipeline_models() -> list[dict[str, str]]:
+    """Return safe metadata for server-configured pipeline models."""
+    models = _load_config().get("pipeline_models")
+    if not isinstance(models, dict):
+        return []
+
+    choices: list[dict[str, str]] = []
+    for model_id, raw_entry in models.items():
+        if not isinstance(model_id, str) or not model_id.strip() or not isinstance(raw_entry, dict):
+            continue
+        model = _optional_string(raw_entry.get("model"))
+        if model is None:
+            continue
+        label = _optional_string(raw_entry.get("label"), model_id) or model_id
+        choices.append({"id": model_id, "label": label})
+    return choices
+
+
+def resolve_pipeline_model(model_id: str) -> ResolvedAgentModel:
+    """Resolve an opaque pipeline model id from trusted server configuration."""
+    normalized_id = model_id.strip()
+    config = _load_config()
+    entry = _pipeline_model_entry(config, normalized_id)
+    if not normalized_id or not entry:
+        raise ValueError("Unknown pipeline model id")
+
+    model = _optional_string(entry.get("model"))
+    if model is None:
+        raise ValueError("Pipeline model is missing its model setting")
+
+    return ResolvedAgentModel(
+        agent_id=None,
+        model=model,
+        base_url=_optional_string(entry.get("base_url")),
+        api_key=_api_key(entry, {}),
     )

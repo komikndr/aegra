@@ -68,17 +68,13 @@ def _extract_permissions(claims: dict) -> list[str]:
     realm_roles = realm_access.get("roles", []) if isinstance(realm_access, dict) else []
     permissions.update(role for role in realm_roles if isinstance(role, str))
 
+    client_id = _env("KEYCLOAK_CLIENT_ID")
     resource_access = claims.get("resource_access", {})
-    if isinstance(resource_access, dict):
-        for client_data in resource_access.values():
-            if not isinstance(client_data, dict):
-                continue
+    if client_id and isinstance(resource_access, dict):
+        client_data = resource_access.get(client_id, {})
+        if isinstance(client_data, dict):
             client_roles = client_data.get("roles", [])
             permissions.update(role for role in client_roles if isinstance(role, str))
-
-    scope = claims.get("scope", "")
-    if isinstance(scope, str) and scope:
-        permissions.update(scope.split())
 
     return sorted(permissions)
 
@@ -101,7 +97,8 @@ async def authenticate(headers: dict) -> dict:
         signing_key = _jwks_client().get_signing_key_from_jwt(token).key
 
         audience = _env("KEYCLOAK_AUDIENCE") or _env("KEYCLOAK_CLIENT_ID")
-        decode_options = {"verify_aud": bool(audience)}
+        if not audience:
+            raise ValueError("KEYCLOAK_AUDIENCE or KEYCLOAK_CLIENT_ID is required")
 
         claims = jwt.decode(
             token,
@@ -109,7 +106,6 @@ async def authenticate(headers: dict) -> dict:
             algorithms=["RS256"],
             issuer=issuer,
             audience=audience,
-            options=decode_options,
         )
     except ValueError as exc:
         raise Auth.exceptions.HTTPException(status_code=500, detail=str(exc)) from exc

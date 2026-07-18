@@ -6,10 +6,20 @@ verifying HTTP status codes, request validation, and delegation behaviour.
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
 from tests.fixtures.test_helpers import DummyRun, make_assistant
+
+
+@pytest.fixture(autouse=True)
+def _bypass_graph_access():
+    """Keep stateless integration tests focused on endpoint behavior."""
+    with patch("aegra_api.services.run_preparation.ensure_graph_access"):
+        yield
+
 
 # ---------------------------------------------------------------------------
 # ORM mock helpers (matching test_runs_crud.py patterns)
@@ -65,6 +75,13 @@ def _run_row(
 
     run.__table__ = _T()
     return run
+
+
+def _make_session_maker(session: DummySessionBase) -> MagicMock:
+    ctx = MagicMock()
+    ctx.__aenter__ = AsyncMock(return_value=session)
+    ctx.__aexit__ = AsyncMock(return_value=False)
+    return MagicMock(return_value=ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +286,7 @@ class TestStatelessStreamRun:
         client = make_client(app)
 
         with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())),
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_service,
             patch("aegra_api.api.stateless_runs._delete_thread_by_id", new_callable=AsyncMock),
         ):
@@ -286,14 +304,18 @@ class TestStatelessStreamRun:
         override_session_dependency(app, BasicSession)
         client = make_client(app)
 
-        resp = client.post(
-            "/runs/stream",
-            json={
-                "assistant_id": "asst-123",
-                "input": {"msg": "hi"},
-                "on_completion": "keep",
-            },
-        )
+        with patch(
+            "aegra_api.api.runs._get_session_maker",
+            return_value=_make_session_maker(BasicSession()),
+        ):
+            resp = client.post(
+                "/runs/stream",
+                json={
+                    "assistant_id": "asst-123",
+                    "input": {"msg": "hi"},
+                    "on_completion": "keep",
+                },
+            )
         assert resp.status_code != 422
 
 

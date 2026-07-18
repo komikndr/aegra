@@ -21,9 +21,15 @@ Usage::
 """
 
 import contextvars
+import logging
+from typing import Any
 
 from opentelemetry.context import Context
 from opentelemetry.sdk.trace import ReadableSpan, Span, SpanProcessor
+
+logger = logging.getLogger(__name__)
+
+_PRIMITIVE_ATTR_TYPES: tuple[type, ...] = (str, int, float, bool)
 
 # Per-request context variable holding span attributes to inject.
 # None means no trace context is set; on_start() is a no-op in that case.
@@ -107,15 +113,48 @@ def set_trace_context(
     if user_id:
         attrs["langfuse.user.id"] = user_id
         attrs["user.id"] = user_id
+        attrs["aegra.user.id"] = user_id
     if session_id:
         attrs["langfuse.session.id"] = session_id
         attrs["session.id"] = session_id
+        attrs["aegra.thread.id"] = session_id
     if trace_name:
         attrs["langfuse.trace.name"] = trace_name
+        attrs["aegra.graph.id"] = trace_name
     if metadata:
         for key, value in metadata.items():
             attrs[f"langfuse.trace.metadata.{key}"] = value
+            attrs[f"metadata.{key}"] = value
+        if run_id := metadata.get("run_id"):
+            attrs["aegra.run.id"] = run_id
+        if thread_id := metadata.get("thread_id"):
+            attrs["aegra.thread.id"] = thread_id
+        if graph_id := metadata.get("graph_id"):
+            attrs["aegra.graph.id"] = graph_id
+        if request_id := metadata.get("original_request_id"):
+            attrs["aegra.request.id"] = request_id
     _trace_attrs.set(attrs or None)
+
+
+def merge_run_metadata(
+    extra_metadata: dict[str, Any] | None,
+    system_metadata: dict[str, str | int | float | bool],
+) -> dict[str, str | int | float | bool]:
+    """Merge trace metadata while preserving authoritative runtime fields."""
+    if not extra_metadata:
+        return dict(system_metadata)
+
+    merged: dict[str, str | int | float | bool] = {}
+    for key, value in extra_metadata.items():
+        if key in system_metadata:
+            logger.warning("User metadata key %r overridden by system value", key)
+            continue
+        if not isinstance(value, _PRIMITIVE_ATTR_TYPES):
+            logger.warning("Dropping non-primitive OTEL metadata key %r", key)
+            continue
+        merged[key] = value
+    merged.update(system_metadata)
+    return merged
 
 
 def make_run_trace_context(
@@ -123,6 +162,8 @@ def make_run_trace_context(
     thread_id: str,
     graph_id: str,
     user_identity: str | None,
+    *,
+    extra_metadata: dict[str, Any] | None = None,
 ) -> contextvars.Context:
     """Return an isolated context copy with OTEL trace attributes pre-set for a run.
 
@@ -130,12 +171,16 @@ def make_run_trace_context(
     span attributes.  Pass the returned context to ``asyncio.create_task(...,
     context=ctx)`` so the background task starts with the correct trace data.
     """
+    metadata = merge_run_metadata(
+        extra_metadata,
+        {"run_id": run_id, "thread_id": thread_id, "graph_id": graph_id},
+    )
     ctx = contextvars.copy_context()
     ctx.run(
         set_trace_context,
         user_id=user_identity,
         session_id=thread_id,
         trace_name=graph_id,
-        metadata={"run_id": run_id, "thread_id": thread_id, "graph_id": graph_id},
+        metadata=metadata,
     )
     return ctx

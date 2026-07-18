@@ -75,7 +75,7 @@ async def require_auth(request: Request) -> User:
     try:
         result = await backend.authenticate(request)
     except Exception as e:
-        raise HTTPException(status_code=401, detail=str(e)) from e
+        raise HTTPException(status_code=401, detail="Authentication failed") from e
 
     if result is None:
         # No auth configured - for now, require auth if backend exists
@@ -83,6 +83,8 @@ async def require_auth(request: Request) -> User:
         raise HTTPException(status_code=401, detail="Authentication required")
 
     credentials, user = result
+    if not user.is_authenticated:
+        raise HTTPException(status_code=401, detail="Invalid authentication")
 
     # Set request.scope for backward compatibility
     # (Some code might still read request.scope["user"] or request.user)

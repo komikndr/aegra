@@ -1,0 +1,8 @@
+services:
+  aegra:
+    environment:
+      - AEGRA_CONFIG=/app/aegra.e2e.json
+      - AUTH_TYPE=noop
+      - ENV_MODE=DEVELOPMENT
+    volumes:
+      - ./aegra.e2e.json:/app/aegra.e2e.json:ro

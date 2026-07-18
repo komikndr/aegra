@@ -15,7 +15,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import datetime
+from typing import Any
 
+import structlog
 from sqlalchemy import (
     TIMESTAMP,
     ForeignKey,
@@ -25,8 +27,44 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine import Dialect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import Mapped, declarative_base, mapped_column
+from sqlalchemy.types import TypeDecorator
+
+logger = structlog.getLogger(__name__)
+_MAX_JSONB_SANITIZE_DEPTH = 200
+
+
+def _strip_jsonb_null_bytes(value: Any, depth: int = 0) -> Any:
+    """Strip PostgreSQL-invalid U+0000 from JSON-compatible values."""
+    if depth >= _MAX_JSONB_SANITIZE_DEPTH:
+        logger.warning("jsonb_sanitize_depth_exceeded", depth=depth, type=type(value).__name__)
+        return value
+    if isinstance(value, str):
+        return value.replace("\x00", "")
+    if isinstance(value, dict):
+        result: dict[Any, Any] = {}
+        for key, item in value.items():
+            clean_key = _strip_jsonb_null_bytes(key, depth + 1)
+            if clean_key in result:
+                logger.warning("jsonb_sanitize_key_collision", key=clean_key)
+            result[clean_key] = _strip_jsonb_null_bytes(item, depth + 1)
+        return result
+    if isinstance(value, (list, tuple)):
+        return [_strip_jsonb_null_bytes(item, depth + 1) for item in value]
+    return value
+
+
+class JsonbSafe(TypeDecorator[Any]):
+    """JSONB type that removes NULL bytes at the database boundary."""
+
+    impl = JSONB
+    cache_ok = True
+
+    def process_bind_param(self, value: Any, dialect: Dialect) -> Any:
+        return _strip_jsonb_null_bytes(value)
+
 
 Base = declarative_base()
 
@@ -41,11 +79,11 @@ class Assistant(Base):
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text)
     graph_id: Mapped[str] = mapped_column(Text, nullable=False)
-    config: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
-    context: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    config: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
+    context: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
-    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    metadata_dict: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"), name="metadata")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
@@ -57,7 +95,7 @@ class Assistant(Base):
             "idx_assistant_user_graph_config",
             "user_id",
             "graph_id",
-            "config",
+            text("md5(config::text)"),
             unique=True,
         ),
     )
@@ -71,10 +109,10 @@ class AssistantVersion(Base):
     )
     version: Mapped[int] = mapped_column(Integer, primary_key=True)
     graph_id: Mapped[str] = mapped_column(Text, nullable=False)
-    config: Mapped[dict | None] = mapped_column(JSONB)
-    context: Mapped[dict | None] = mapped_column(JSONB)
+    config: Mapped[dict | None] = mapped_column(JsonbSafe)
+    context: Mapped[dict | None] = mapped_column(JsonbSafe)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
-    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    metadata_dict: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"), name="metadata")
     name: Mapped[str | None] = mapped_column(Text)
     description: Mapped[str | None] = mapped_column(Text)
 
@@ -85,7 +123,7 @@ class Thread(Base):
     thread_id: Mapped[str] = mapped_column(Text, primary_key=True)
     status: Mapped[str] = mapped_column(Text, server_default=text("'idle'"))
     # Database column is 'metadata_json' (per database.py). ORM attribute 'metadata_json' must map to that column.
-    metadata_json: Mapped[dict] = mapped_column("metadata_json", JSONB, server_default=text("'{}'::jsonb"))
+    metadata_json: Mapped[dict] = mapped_column("metadata_json", JsonbSafe, server_default=text("'{}'::jsonb"))
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
@@ -102,12 +140,12 @@ class Run(Base):
     thread_id: Mapped[str] = mapped_column(Text, ForeignKey("thread.thread_id", ondelete="CASCADE"), nullable=False)
     assistant_id: Mapped[str | None] = mapped_column(Text, ForeignKey("assistant.assistant_id", ondelete="CASCADE"))
     status: Mapped[str] = mapped_column(Text, server_default=text("'pending'"))
-    input: Mapped[dict | None] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    input: Mapped[dict | None] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     # Some environments may not yet have a 'config' column; make it nullable without default to match existing DB.
     # If migrations add this column later, it's already represented here.
-    config: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    context: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    output: Mapped[dict | None] = mapped_column(JSONB)
+    config: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
+    context: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
+    output: Mapped[dict | None] = mapped_column(JsonbSafe)
     error_message: Mapped[str | None] = mapped_column(Text)
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
@@ -115,7 +153,7 @@ class Run(Base):
 
     # Worker execution: stores RunJob params so workers can reconstruct
     # the job from the database after receiving a run_id via Redis.
-    execution_params: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    execution_params: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
 
     # Lease-based crash recovery: tracks which worker owns a run and
     # when the lease expires. A background reaper re-enqueues runs
@@ -145,7 +183,7 @@ class ExecutiveArtifact(Base):
     agent_id: Mapped[str | None] = mapped_column(Text)
     artifact_kind: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'executive_report'"))
     source_message_id: Mapped[str | None] = mapped_column(Text)
-    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    metadata_dict: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"), name="metadata")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
@@ -167,7 +205,7 @@ class UserMemory(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     source_thread_id: Mapped[str | None] = mapped_column(Text)
     source_run_id: Mapped[str | None] = mapped_column(Text)
-    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    metadata_dict: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"), name="metadata")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
@@ -184,7 +222,7 @@ class UserMemorySnapshot(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
     version: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
     memory_hash: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    metadata_dict: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"), name="metadata")
+    metadata_dict: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"), name="metadata")
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
@@ -198,7 +236,7 @@ class PipelineWorkflow(Base):
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
-    graph: Mapped[dict] = mapped_column(JSONB, server_default=text("'{}'::jsonb"))
+    graph: Mapped[dict] = mapped_column(JsonbSafe, server_default=text("'{}'::jsonb"))
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
 
@@ -211,9 +249,7 @@ class PipelineWorkflow(Base):
 class PipelineApiKey(Base):
     __tablename__ = "pipeline_api_keys"
 
-    key_id: Mapped[str] = mapped_column(
-        Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text")
-    )
+    key_id: Mapped[str] = mapped_column(Text, primary_key=True, server_default=text("public.uuid_generate_v4()::text"))
     workflow_id: Mapped[str] = mapped_column(
         Text, ForeignKey("pipeline_workflows.workflow_id", ondelete="CASCADE"), nullable=False
     )
@@ -241,8 +277,8 @@ class PipelineRun(Base):
     )
     user_id: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'completed'"))
-    input: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    output: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    input: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
+    output: Mapped[dict | None] = mapped_column(JsonbSafe, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))
     updated_at: Mapped[datetime] = mapped_column(TIMESTAMP(timezone=True), server_default=text("now()"))

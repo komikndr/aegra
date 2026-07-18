@@ -103,3 +103,30 @@ async def test_lifespan_calls_required_initialization():
 
         # Verify cleanup
         mock_db_manager.close.assert_called_once()
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_lifespan_skips_migrations_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    import aegra_api.main as main_module
+
+    importlib.reload(main_module)
+    monkeypatch.setattr(main_module.settings.app, "RUN_MIGRATIONS_ON_STARTUP", False)
+
+    with (
+        patch("aegra_api.main.run_migrations_async", new_callable=AsyncMock) as mock_migrations,
+        patch("aegra_api.main.db_manager") as mock_db_manager,
+        patch("aegra_api.main.get_langgraph_service") as mock_get_langgraph_service,
+        patch("aegra_api.main.setup_observability"),
+    ):
+        mock_db_manager.initialize = AsyncMock()
+        mock_db_manager.close = AsyncMock()
+        mock_service = MagicMock()
+        mock_service.initialize = AsyncMock()
+        mock_get_langgraph_service.return_value = mock_service
+
+        async with main_module.lifespan(MagicMock()):
+            pass
+
+    mock_migrations.assert_not_called()
+    mock_db_manager.initialize.assert_awaited_once()

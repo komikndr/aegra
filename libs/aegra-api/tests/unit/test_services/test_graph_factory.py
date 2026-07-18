@@ -613,6 +613,17 @@ class TestCoerceContext:
         assert result.name == "test"
         assert result.value == 42
 
+    def test_dataclass_coercion_ignores_server_context_fields(self) -> None:
+        """Server-injected context fields do not break strict dataclasses."""
+        _FACTORY_CONTEXT_TYPES["g"] = _DataclassCtx
+        ctx = {"name": "test", "value": 42, "user_memory": "private context"}
+
+        result = coerce_context(ctx, "g")
+
+        assert isinstance(result, _DataclassCtx)
+        assert result.name == "test"
+        assert result.value == 42
+
     def test_pydantic_validation_error_falls_back(self) -> None:
         """Invalid data for Pydantic model → graceful fallback to raw dict."""
         _FACTORY_CONTEXT_TYPES["g"] = _PydanticCtx

@@ -16,7 +16,7 @@ class TestRunBroker:
         broker = RunBroker("run-123")
 
         assert broker.run_id == "run-123"
-        assert broker.queue is not None
+        assert broker._subscribers == set()
         assert not broker.finished.is_set()
 
     @pytest.mark.asyncio
@@ -26,10 +26,7 @@ class TestRunBroker:
 
         await broker.put("evt-1", {"data": "test"})
 
-        # Event should be in queue
-        event_id, payload = await asyncio.wait_for(broker.queue.get(), timeout=1.0)
-        assert event_id == "evt-1"
-        assert payload == {"data": "test"}
+        assert await broker.replay(None) == [("evt-1", {"data": "test"})]
 
     @pytest.mark.asyncio
     async def test_put_end_event_marks_finished(self):
@@ -51,8 +48,7 @@ class TestRunBroker:
         # Should not raise, just log warning
         await broker.put("evt-1", {"data": "test"})
 
-        # Queue should be empty
-        assert broker.queue.empty()
+        assert await broker.replay(None) == []
 
     @pytest.mark.asyncio
     async def test_mark_finished(self):
@@ -99,6 +95,28 @@ class TestRunBroker:
 
         # Should get both events including end
         assert len(events) == 2
+
+    @pytest.mark.asyncio
+    async def test_two_concurrent_aiters_each_receive_every_event(self):
+        broker = RunBroker("run-123")
+
+        async def drain() -> list[tuple[str, object]]:
+            events: list[tuple[str, object]] = []
+            async for event_id, payload in broker.aiter():
+                events.append((event_id, payload))
+            return events
+
+        first = asyncio.create_task(drain())
+        second = asyncio.create_task(drain())
+        await asyncio.sleep(0.05)
+
+        await broker.put("evt-1", {"data": "first"})
+        await broker.put("evt-2", {"data": "second"})
+        await broker.put("evt-end", ("end", {}))
+
+        first_events, second_events = await asyncio.gather(first, second)
+        assert first_events == second_events
+        assert [event_id for event_id, _ in first_events] == ["evt-1", "evt-2", "evt-end"]
 
 
 class TestBrokerManager:

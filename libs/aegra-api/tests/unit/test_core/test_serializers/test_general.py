@@ -57,6 +57,12 @@ class TestGeneralSerializer:
 
         assert result == {"name": "test", "value": 42}
 
+    def test_serialize_pydantic_model_class(self):
+        """Class objects are represented without calling unbound model_dump."""
+        result = self.serializer.serialize(PydanticV2Model)
+
+        assert result == f"{PydanticV2Model.__module__}.PydanticV2Model"
+
     def test_serialize_pydantic_v1_style(self):
         """Test serialization of Pydantic v1 style object"""
         obj = PydanticV1Style(name="test", value=42)

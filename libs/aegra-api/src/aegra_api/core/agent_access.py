@@ -1,4 +1,4 @@
-"""Role-based agent access helpers."""
+"""Deny-by-default role policy for registered graphs."""
 
 from collections.abc import Iterable
 
@@ -6,11 +6,7 @@ from fastapi import HTTPException
 
 from ..models import Assistant, Thread, User
 
-KNOWN_AGENT_IDS = {"kms", "qa", "analytic", "casual"}
-PUBLIC_AGENT_IDS = {"qa"}
-EXECUTIVE_AGENT_IDS = {"analytic", "casual"}
-STAFF_AGENT_IDS = {"kms"}
-DEFAULT_AGENT_IDS = {"qa", "casual"}
+_graph_access_policy: dict[str, frozenset[str]] = {}
 
 
 def _normalize_role(role: str) -> str:
@@ -27,48 +23,54 @@ def has_superadmin_access(permissions: Iterable[str] | None) -> bool:
     return "superadmin" in _normalized_roles(permissions)
 
 
-def get_allowed_agent_ids(permissions: Iterable[str] | None) -> set[str]:
-    roles = _normalized_roles(permissions)
-    if "superadmin" in roles:
-        return set(KNOWN_AGENT_IDS)
+def configure_graph_access(graph_ids: Iterable[str], policy: dict[str, list[str]]) -> None:
+    """Validate and install the complete graph access policy."""
+    registered = set(graph_ids)
+    configured = set(policy)
+    missing = sorted(registered - configured)
+    unknown = sorted(configured - registered)
+    if missing or unknown:
+        details = []
+        if missing:
+            details.append(f"missing policies for: {', '.join(missing)}")
+        if unknown:
+            details.append(f"policies for unknown graphs: {', '.join(unknown)}")
+        raise ValueError("Invalid graph_access configuration (" + "; ".join(details) + ")")
 
-    allowed_agent_ids: set[str] = set(PUBLIC_AGENT_IDS)
+    normalized: dict[str, frozenset[str]] = {}
+    for graph_id, roles in policy.items():
+        if not isinstance(roles, list) or not all(isinstance(role, str) and role.strip() for role in roles):
+            raise ValueError(f"graph_access.{graph_id} must be a list of non-empty role names")
+        normalized[graph_id] = frozenset(_normalize_role(role) for role in roles)
 
-    if "executive" in roles or "seniordataengineer" in roles:
-        allowed_agent_ids.update(EXECUTIVE_AGENT_IDS)
-
-    if "staff" in roles:
-        allowed_agent_ids.update(STAFF_AGENT_IDS)
-
-    if allowed_agent_ids == PUBLIC_AGENT_IDS:
-        allowed_agent_ids.update(DEFAULT_AGENT_IDS)
-
-    return allowed_agent_ids
-
-
-def get_agent_id_from_graph_id(graph_id: str | None) -> str | None:
-    if not graph_id:
-        return None
-
-    agent_id = graph_id.split("_", 1)[0]
-    return agent_id if agent_id in KNOWN_AGENT_IDS else None
+    global _graph_access_policy
+    _graph_access_policy = normalized
 
 
 def ensure_graph_access(user: User, graph_id: str | None) -> None:
-    if not graph_id:
+    if graph_id is None:
         return
 
     if has_superadmin_access(user.permissions):
         return
 
-    agent_id = get_agent_id_from_graph_id(graph_id)
-    if agent_id is None:
-        return
-
-    if agent_id and agent_id in get_allowed_agent_ids(user.permissions):
+    required_roles = _graph_access_policy.get(graph_id)
+    if required_roles is not None and (not required_roles or required_roles & _normalized_roles(user.permissions)):
         return
 
     raise HTTPException(status_code=403, detail="You do not have access to this agent.")
+
+
+def get_accessible_graph_ids(user: User) -> frozenset[str]:
+    """Return registered graph IDs visible to the authenticated user."""
+    if has_superadmin_access(user.permissions):
+        return frozenset(_graph_access_policy)
+    roles = _normalized_roles(user.permissions)
+    return frozenset(
+        graph_id
+        for graph_id, required_roles in _graph_access_policy.items()
+        if not required_roles or required_roles & roles
+    )
 
 
 def assistant_is_accessible(assistant: Assistant, user: User) -> bool:

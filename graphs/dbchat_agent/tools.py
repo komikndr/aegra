@@ -6,44 +6,27 @@ import os
 import re
 from collections.abc import Callable
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote_plus
 
 from langgraph.runtime import get_runtime
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from aegra_api.security.sql_readonly import UnsafeSqlError, execute_read_only_sql, validate_read_only_sql
 from dbchat_agent.context import Context
 
-READ_ONLY_PREFIXES = ("select", "with", "show", "describe", "explain", "pragma")
-FORBIDDEN_SQL_KEYWORDS = (
-    "alter",
-    "attach",
-    "call",
-    "copy",
-    "create",
-    "delete",
-    "drop",
-    "grant",
-    "insert",
-    "merge",
-    "replace",
-    "revoke",
-    "truncate",
-    "update",
-    "vacuum",
-)
 SYSTEM_SCHEMAS = {"information_schema", "pg_catalog", "pg_toast", "sys", "system"}
 
 
 def _build_database_url(context: Context) -> str | None:
-    database_url = context.analytic_db_url or os.environ.get("ANALYTIC_DB_URL", "").strip()
+    database_url = os.environ.get("ANALYTIC_DB_URL", "").strip()
     if database_url:
         return database_url
 
-    dialect = (context.analytic_db_dialect or os.environ.get("ANALYTIC_DB_DIALECT", "sqlite")).strip().lower()
-    db_name = context.analytic_db_name or os.environ.get("ANALYTIC_DB_NAME")
+    dialect = os.environ.get("ANALYTIC_DB_DIALECT", "sqlite").strip().lower()
+    db_name = os.environ.get("ANALYTIC_DB_NAME", "").strip()
     if dialect == "sqlite":
         if not db_name:
             return None
@@ -53,17 +36,17 @@ def _build_database_url(context: Context) -> str | None:
             return f"sqlite:///{db_name}"
         return f"sqlite:///./{db_name}"
 
-    db_host = context.analytic_db_host or os.environ.get("ANALYTIC_DB_HOST")
-    db_port = context.analytic_db_port or os.environ.get("ANALYTIC_DB_PORT")
-    db_user = context.analytic_db_user or os.environ.get("ANALYTIC_DB_USER")
-    db_password = context.analytic_db_password or os.environ.get("ANALYTIC_DB_PASSWORD")
+    db_host = os.environ.get("ANALYTIC_DB_HOST", "").strip()
+    db_port = os.environ.get("ANALYTIC_DB_PORT", "").strip()
+    db_user = os.environ.get("ANALYTIC_DB_USER", "").strip()
+    db_password = os.environ.get("ANALYTIC_DB_PASSWORD", "").strip()
     if not all([db_host, db_name, db_user]):
         return None
 
     driver = "postgresql+psycopg" if dialect in {"postgres", "postgresql"} else dialect
     port = f":{db_port}" if db_port else ""
-    user = quote_plus(cast("str", db_user or ""))
-    password = quote_plus(cast("str", db_password or ""))
+    user = quote_plus(db_user)
+    password = quote_plus(db_password)
     auth = f"{user}:{password}" if password else user
     return f"{driver}://{auth}@{db_host}{port}/{db_name}"
 
@@ -93,15 +76,15 @@ def _database_unavailable_message() -> str:
 
 
 def _database_error_message(error: Exception) -> str:
-    return f"Analytic database is unavailable: {error}"
+    return "Analytic database is unavailable."
 
 
-def _is_read_only_query(query: str) -> bool:
-    normalized = " ".join(query.strip().strip(";").lower().split())
-    if not normalized.startswith(READ_ONLY_PREFIXES):
+def _is_read_only_query(query: str, dialect: str = "sqlite") -> bool:
+    try:
+        validate_read_only_sql(query, dialect)
+    except UnsafeSqlError:
         return False
-    guarded = f" {normalized} "
-    return not any(f" {keyword} " in guarded for keyword in FORBIDDEN_SQL_KEYWORDS)
+    return True
 
 
 def _normalize_identifier(value: str) -> tuple[str, ...]:
@@ -160,7 +143,7 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
-async def dbchat_list_tables() -> dict[str, Any]:
+def dbchat_list_tables() -> dict[str, Any]:
     """List available tables and views in the configured analytic database."""
     engine = _get_engine_from_runtime()
     if engine is None:
@@ -188,7 +171,7 @@ async def dbchat_list_tables() -> dict[str, Any]:
         return {"available": False, "message": _database_error_message(error), "tables": [], "views": []}
 
 
-async def dbchat_describe_table(table_name: str, schema: str | None = None) -> dict[str, Any]:
+def dbchat_describe_table(table_name: str, schema: str | None = None) -> dict[str, Any]:
     """Describe a table or view, including column names and types."""
     engine = _get_engine_from_runtime()
     if engine is None:
@@ -219,13 +202,13 @@ async def dbchat_describe_table(table_name: str, schema: str | None = None) -> d
         return {"available": False, "message": _database_error_message(error)}
 
 
-async def dbchat_query_sql(query: str) -> dict[str, Any]:
+def dbchat_query_sql(query: str) -> dict[str, Any]:
     """Run a read-only SQL query against the analytic database. Returns executed SQL and rows."""
     engine = _get_engine_from_runtime()
     if engine is None:
         return {"available": False, "message": _database_unavailable_message(), "rows": [], "sql": query}
 
-    if not _is_read_only_query(query):
+    if not _is_read_only_query(query, engine.dialect.name):
         return {
             "available": True,
             "executed": False,
@@ -238,19 +221,23 @@ async def dbchat_query_sql(query: str) -> dict[str, Any]:
         return {"available": True, "executed": False, "message": policy_error, "sql": query}
 
     try:
-        with engine.connect() as connection:
-            result = connection.execute(text(query))
-            rows = result.mappings().fetchmany(200)
-            return {
-                "available": True,
-                "executed": True,
-                "sql": query,
-                "row_count": len(rows),
-                "columns": list(result.keys()),
-                "rows": [{key: _json_safe(value) for key, value in dict(row).items()} for row in rows],
-            }
-    except SQLAlchemyError as error:
-        return {"available": False, "executed": False, "message": _database_error_message(error), "rows": [], "sql": query}
+        columns, rows = execute_read_only_sql(engine, query, max_rows=200)
+        return {
+            "available": True,
+            "executed": True,
+            "sql": query,
+            "row_count": len(rows),
+            "columns": columns,
+            "rows": [{key: _json_safe(value) for key, value in row.items()} for row in rows],
+        }
+    except (SQLAlchemyError, UnsafeSqlError) as error:
+        return {
+            "available": False,
+            "executed": False,
+            "message": _database_error_message(error),
+            "rows": [],
+            "sql": query,
+        }
 
 
 TOOLS: list[Callable[..., Any]] = [dbchat_list_tables, dbchat_describe_table, dbchat_query_sql]

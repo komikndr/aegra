@@ -13,7 +13,7 @@ import contextlib
 import json
 import random
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 import structlog
@@ -41,6 +41,7 @@ _REPLAY_MAX_EVENTS = 10_000
 _BACKOFF_BASE = 0.5
 _BACKOFF_MAX = 30.0
 _BACKOFF_FACTOR = 2.0
+_PUT_MAX_ATTEMPTS = 3
 
 
 def _serialize_payload(payload: Any) -> str:
@@ -80,8 +81,10 @@ class RedisRunBroker(BaseRunBroker):
         self._cache_key = cache_key
         self._counter_key = counter_key
         self._finished = False
+        self._write_lock = asyncio.Lock()
 
     async def put(self, event_id: str, payload: Any, *, resumable: bool = True) -> None:
+        """Cache and publish an event with bounded at-least-once delivery."""
         if self._finished:
             logger.warning(f"Attempted to put event {event_id} into finished broker for run {self.run_id}")
             return
@@ -95,28 +98,57 @@ class RedisRunBroker(BaseRunBroker):
 
         is_end = isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end"
 
-        try:
-            client = redis_manager.get_client()
+        async with self._write_lock:
+            operation = "cache"
+            try:
+                if resumable:
+                    await self._write_with_retry(self._cache_event, message)
 
-            if resumable:
-                pipe = client.pipeline()
-                pipe.rpush(self._cache_key, message)
-                pipe.ltrim(self._cache_key, -_REPLAY_MAX_EVENTS, -1)
-                pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
-                pipe.incr(self._counter_key)
-                pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
-                await pipe.execute()  # type: ignore[invalid-await]
+                operation = "publish"
+                await self._write_with_retry(self._publish_event, message)
 
-            await client.publish(self._channel, message)
+                if is_end:
+                    self._finished = True
+            except RedisError as exc:
+                logger.error(
+                    f"Redis {operation} write failed for run {self.run_id} after {_PUT_MAX_ATTEMPTS} attempts: {exc}"
+                )
+                if is_end:
+                    self._finished = True
 
-            if is_end:
-                self._finished = True
-        except RedisError as e:
-            logger.error(f"Redis publish failed for run {self.run_id}: {e}")
-            # Even if Redis fails, mark finished for end events so aiter() can exit
-            # rather than looping forever waiting for an end event that won't arrive.
-            if is_end:
-                self._finished = True
+    async def _cache_event(self, message: str) -> None:
+        """Append an event to replay storage and advance its sequence."""
+        client = redis_manager.get_client()
+        pipe = client.pipeline()
+        pipe.rpush(self._cache_key, message)
+        pipe.ltrim(self._cache_key, -_REPLAY_MAX_EVENTS, -1)
+        pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
+        pipe.incr(self._counter_key)
+        pipe.expire(self._counter_key, _REPLAY_TTL_SECONDS)
+        await pipe.execute()  # type: ignore[invalid-await]
+
+    async def _publish_event(self, message: str) -> None:
+        """Publish an event to live subscribers."""
+        client = redis_manager.get_client()
+        await client.publish(self._channel, message)
+
+    async def _write_with_retry(self, operation: Callable[[str], Awaitable[None]], message: str) -> None:
+        """Retry a transient Redis write without blocking indefinitely."""
+        attempt = 0
+        while True:
+            try:
+                await operation(message)
+                return
+            except RedisError as exc:
+                attempt += 1
+                if attempt >= _PUT_MAX_ATTEMPTS:
+                    raise
+                delay = _backoff_delay(attempt)
+                logger.warning(
+                    f"Redis write failed for run {self.run_id}, retrying in {delay:.1f}s: {exc}",
+                    attempt=attempt,
+                )
+                await asyncio.sleep(delay)
 
     async def aiter(self) -> AsyncIterator[tuple[str, Any]]:
         attempt = 0
@@ -146,6 +178,7 @@ class RedisRunBroker(BaseRunBroker):
         # the end event was published before we subscribed on this instance).
         end_already_in_buffer = await self._check_end_in_buffer()
 
+        last_yielded_event_id: str | None = None
         try:
             while True:
                 message = await pubsub.get_message(
@@ -162,6 +195,9 @@ class RedisRunBroker(BaseRunBroker):
 
                 data = json.loads(message["data"])
                 event_id: str = data["event_id"]
+                if event_id == last_yielded_event_id:
+                    continue
+                last_yielded_event_id = event_id
                 payload = _deserialize_payload(data["payload"])
 
                 yield event_id, payload
@@ -206,9 +242,13 @@ class RedisRunBroker(BaseRunBroker):
         all_events: list[tuple[str, Any]] = []
         events_after: list[tuple[str, Any]] = []
         found_last = last_event_id is None
+        previous_event_id: str | None = None
         for raw in raw_messages:
             data = json.loads(raw)
             event_id: str = data["event_id"]
+            if event_id == previous_event_id:
+                continue
+            previous_event_id = event_id
             payload = _deserialize_payload(data["payload"])
             all_events.append((event_id, payload))
 

@@ -1,7 +1,7 @@
 """Assistant-related Pydantic models for Agent Protocol"""
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -74,6 +74,10 @@ class AssistantSearchRequest(BaseModel):
     limit: int | None = Field(20, le=100, ge=1, description="Maximum results")
     offset: int | None = Field(0, ge=0, description="Results offset")
     metadata: dict[str, Any] | None = Field({}, description="Metadata to use for searching and filtering assistants.")
+    sort_by: Literal["created_at", "updated_at", "name", "assistant_id"] | None = Field(
+        None, description="Field used to sort results"
+    )
+    sort_order: Literal["asc", "desc"] | None = Field(None, description="Sort direction")
 
 
 class AgentSchemas(BaseModel):

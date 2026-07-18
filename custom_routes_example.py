@@ -35,7 +35,6 @@ You can also configure CORS:
 
 # ruff: noqa: E402
 
-import asyncio
 import base64
 import csv
 import hashlib
@@ -46,8 +45,8 @@ import os
 import re
 import secrets
 import sys
-import urllib.request
 import uuid
+import warnings
 from abc import ABC, abstractmethod
 from datetime import UTC, datetime
 from functools import lru_cache
@@ -67,8 +66,15 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langchain_openai import OpenAIEmbeddings
 from opensearchpy import OpenSearch as OpenSearchClient
 from opensearchpy import TransportError
+from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
-from react_agent.model_config import resolve_agent_model
+from react_agent.model_config import (
+    list_pipeline_models as list_configured_pipeline_models,
+)
+from react_agent.model_config import (
+    resolve_agent_model,
+    resolve_pipeline_model,
+)
 from react_agent.utils import (
     apply_reasoning_effort,
     get_active_model_name,
@@ -82,10 +88,11 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from aegra_api.core.agent_access import ensure_graph_access
+from aegra_api.core.agent_access import ensure_graph_access, has_superadmin_access
 from aegra_api.core.auth_deps import require_auth
 from aegra_api.core.orm import ExecutiveArtifact, PipelineApiKey, PipelineRun, PipelineWorkflow, Thread, get_session
 from aegra_api.models.auth import User
+from aegra_api.security.sql_readonly import UnsafeSqlError, execute_read_only_sql, validate_read_only_sql
 
 # Create your FastAPI app instance
 # This will be merged with Aegra's core routes
@@ -223,24 +230,6 @@ class DbChatAdapter(ABC):
         raise NotImplementedError
 
 
-READ_ONLY_SQL_PREFIXES = ("select", "with", "show", "describe", "explain")
-FORBIDDEN_DBCHAT_SQL_KEYWORDS = (
-    "alter",
-    "attach",
-    "call",
-    "copy",
-    "create",
-    "delete",
-    "drop",
-    "grant",
-    "insert",
-    "merge",
-    "replace",
-    "revoke",
-    "truncate",
-    "update",
-    "vacuum",
-)
 SYSTEM_SCHEMAS = {
     "information_schema",
     "pg_catalog",
@@ -293,12 +282,12 @@ def _is_system_schema(schema: str | None) -> bool:
     return lowered in SYSTEM_SCHEMAS or lowered.startswith("pg_temp_") or lowered.startswith("pg_toast_temp_")
 
 
-def _is_read_only_dbchat_sql(sql: str) -> bool:
-    normalized = " ".join(sql.strip().strip(";").lower().split())
-    if not normalized.startswith(READ_ONLY_SQL_PREFIXES):
+def _is_read_only_dbchat_sql(sql: str, dialect: str = "sqlite") -> bool:
+    try:
+        validate_read_only_sql(sql, dialect)
+    except UnsafeSqlError:
         return False
-    guarded = f" {normalized} "
-    return not any(f" {keyword} " in guarded for keyword in FORBIDDEN_DBCHAT_SQL_KEYWORDS)
+    return True
 
 
 def _json_safe_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -474,20 +463,19 @@ class SqlAlchemyDbChatAdapter(DbChatAdapter):
         return self.query(sql, limit=safe_limit)
 
     def query(self, sql: str, limit: int = 200) -> dict[str, Any]:
-        if not _is_read_only_dbchat_sql(sql):
-            raise HTTPException(status_code=400, detail="Only read-only SQL is allowed for DBChat.")
         safe_limit = max(1, min(limit, 1000))
-        with self.engine.connect() as connection:
-            result = connection.execute(text(sql))
-            rows = [dict(row) for row in result.mappings().fetchmany(safe_limit)]
-            return {
-                "connectionId": self.connection_id,
-                "engineId": self.engine.dialect.name,
-                "columns": list(result.keys()),
-                "rows": _json_safe_rows(rows),
-                "rowCount": len(rows),
-                "limit": safe_limit,
-            }
+        try:
+            columns, rows = execute_read_only_sql(self.engine, sql, max_rows=safe_limit)
+        except UnsafeSqlError as exc:
+            raise HTTPException(status_code=400, detail="Only read-only SQL is allowed for DBChat.") from exc
+        return {
+            "connectionId": self.connection_id,
+            "engineId": self.engine.dialect.name,
+            "columns": columns,
+            "rows": _json_safe_rows(rows),
+            "rowCount": len(rows),
+            "limit": safe_limit,
+        }
 
 
 class TrinoDbChatAdapter(SqlAlchemyDbChatAdapter):
@@ -654,7 +642,11 @@ def _format_dbchat_table_details(adapter: DbChatAdapter, selected_table: DbChatS
             nullable = column.get("nullable")
             nullability = " nullable" if nullable is not False else " not null"
             column_lines.append(f"- {name}: {column_type}{nullability}")
-    return _dbchat_qualified_table_label(selected_table) + "\nColumns:\n" + ("\n".join(column_lines) or "No columns returned.")
+    return (
+        _dbchat_qualified_table_label(selected_table)
+        + "\nColumns:\n"
+        + ("\n".join(column_lines) or "No columns returned.")
+    )
 
 
 def _format_dbchat_catalog_scope(adapter: DbChatAdapter, limit: int = 140) -> str:
@@ -848,7 +840,9 @@ def _dbchat_user_wants_rows(message: str) -> bool:
 
 def _dbchat_user_wants_preview(message: str) -> bool:
     lowered = message.lower()
-    return any(keyword in lowered for keyword in ("show", "preview", "sample", "records", "rows", "data", "lihat", "tampil"))
+    return any(
+        keyword in lowered for keyword in ("show", "preview", "sample", "records", "rows", "data", "lihat", "tampil")
+    )
 
 
 def _dbchat_user_wants_chart(message: str) -> bool:
@@ -979,7 +973,9 @@ def _build_dbchat_chart_option(message: str, query_result: dict[str, Any] | None
     if not label_column or not value_column:
         return None
     if label_column == value_column:
-        label_column = next((column for column in columns if isinstance(column, str) and column != value_column), label_column)
+        label_column = next(
+            (column for column in columns if isinstance(column, str) and column != value_column), label_column
+        )
 
     labels = [str(row.get(label_column, "")) for row in sample_rows[:50]]
     values = [_dbchat_float(row.get(value_column)) or 0 for row in sample_rows[:50]]
@@ -1078,15 +1074,6 @@ def _hash_pipeline_key(raw_key: str) -> str:
     return hashlib.sha256(raw_key.encode("utf-8")).hexdigest()
 
 
-def _resolve_pipeline_base_url(value: Any) -> str | None:
-    if not isinstance(value, str) or not value.strip():
-        return None
-    resolved = os.path.expandvars(value).strip()
-    if "$" in resolved:
-        return None
-    return resolved or None
-
-
 def _default_pipeline_blueprint(workflow_id: str) -> PipelineBlueprintPayload:
     return PipelineBlueprintPayload(
         workflowId=workflow_id,
@@ -1114,7 +1101,7 @@ def _default_pipeline_blueprint(workflow_id: str) -> PipelineBlueprintPayload:
                 label="JSON Formatter",
                 position={"x": 390, "y": 90},
                 config={
-                    "model": _get_configured_model(),
+                    "modelId": "default",
                     "systemMessage": "Normalize each inbound row into a clean JSON object suitable for downstream analytics.",
                     "structuredOutput": {
                         "name": "normalized_row",
@@ -1172,6 +1159,20 @@ def _validate_pipeline_graph(graph: PipelineBlueprintPayload) -> None:
         raise HTTPException(status_code=422, detail="Workflow node ids must be unique")
     if not any(node.type == "source" for node in graph.nodes):
         raise HTTPException(status_code=422, detail="Workflow requires a source node")
+    for node in graph.nodes:
+        if node.type == "sink":
+            raise HTTPException(status_code=422, detail="Pipeline sink nodes are disabled")
+        if node.type in {"formatter", "csv_formatter"}:
+            forbidden = {"model", "baseUrl", "base_url", "apiKey", "api_key"}.intersection(node.config)
+            if forbidden:
+                raise HTTPException(status_code=422, detail="Pipeline formatter provider settings are server-managed")
+            model_id = node.config.get("modelId")
+            if not isinstance(model_id, str) or not model_id.strip():
+                raise HTTPException(status_code=422, detail="Pipeline formatter requires a modelId")
+            try:
+                resolve_pipeline_model(model_id)
+            except ValueError as exc:
+                raise HTTPException(status_code=422, detail="Unknown pipeline modelId") from exc
     known = set(node_ids)
     for edge in graph.edges:
         if edge.source not in known or edge.target not in known:
@@ -1262,14 +1263,31 @@ def _csv_from_value(value: Any, config: dict[str, Any]) -> str:
 
 async def _run_pipeline_formatter(row: Any, node: PipelineNodePayload) -> Any:
     config = node.config
-    selected_model = config.get("model") if isinstance(config.get("model"), str) else _get_configured_model()
-    base_url = _resolve_pipeline_base_url(config.get("baseUrl"))
-    model = load_chat_model(selected_model, base_url=base_url)
-    model = apply_reasoning_effort(model, selected_model, "none", base_url=base_url)
+    model_id = config.get("modelId")
+    if not isinstance(model_id, str):
+        raise HTTPException(status_code=422, detail="Pipeline formatter requires a modelId")
+    try:
+        model_config = resolve_pipeline_model(model_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="Unknown pipeline modelId") from exc
+    model = load_chat_model(
+        model_config.model,
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+    )
+    model = apply_reasoning_effort(
+        model,
+        model_config.model,
+        "none",
+        base_url=model_config.base_url,
+        api_key=model_config.api_key,
+    )
     schema = _structured_schema(config)
     structured = config.get("structuredOutput") if isinstance(config.get("structuredOutput"), dict) else {}
     strict = bool(structured.get("strict", True))
-    system_message = config.get("systemMessage") if isinstance(config.get("systemMessage"), str) else "Process one JSON row."
+    system_message = (
+        config.get("systemMessage") if isinstance(config.get("systemMessage"), str) else "Process one JSON row."
+    )
     prompt = (
         f"{system_message}\n\n"
         "Return only valid JSON. Do not include prose or markdown fences.\n"
@@ -1290,24 +1308,6 @@ async def _run_pipeline_formatter(row: Any, node: PipelineNodePayload) -> Any:
     if node.type == "csv_formatter":
         return _csv_from_value(parsed, config)
     return parsed
-
-
-async def _post_pipeline_egress(url: str, payload: Any, *, method: str = "POST", headers: dict[str, str] | None = None) -> dict[str, Any]:
-    body = json.dumps(payload, ensure_ascii=False, default=str).encode("utf-8")
-    request_headers = {"Content-Type": "application/json", "Accept": "application/json", **(headers or {})}
-
-    def send() -> dict[str, Any]:
-        request = urllib.request.Request(  # nosec B310 - user-configured pipeline sink
-            url,
-            data=body,
-            method=method.upper(),
-            headers=request_headers,
-        )
-        with urllib.request.urlopen(request, timeout=15) as response:  # nosec B310 - user-configured pipeline sink
-            response_body = response.read().decode("utf-8")
-            return {"status": response.status, "body": response_body[:2000]}
-
-    return await asyncio.to_thread(send)
 
 
 def _topological_pipeline_nodes(graph: PipelineBlueprintPayload) -> list[PipelineNodePayload]:
@@ -1332,6 +1332,7 @@ def _topological_pipeline_nodes(graph: PipelineBlueprintPayload) -> list[Pipelin
 
 
 async def _execute_pipeline_graph(rows: list[Any], graph: PipelineBlueprintPayload, dry_run: bool) -> dict[str, Any]:
+    _validate_pipeline_graph(graph)
     ordered = _topological_pipeline_nodes(graph)
     incoming: dict[str, list[str]] = {node.id: [] for node in graph.nodes}
     for edge in graph.edges:
@@ -1355,50 +1356,20 @@ async def _execute_pipeline_graph(rows: list[Any], graph: PipelineBlueprintPaylo
 
             if node.type in {"formatter", "csv_formatter"}:
                 node_values[node.id] = node_input if dry_run else await _run_pipeline_formatter(node_input, node)
-            elif node.type == "sink":
-                node_values[node.id] = node_input
-                url = node.config.get("url") if isinstance(node.config.get("url"), str) else ""
-                enabled = bool(node.config.get("enabled", True))
-                if url and enabled and not dry_run:
-                    method = node.config.get("method") if isinstance(node.config.get("method"), str) else "POST"
-                    headers = node.config.get("headers") if isinstance(node.config.get("headers"), dict) else {}
-                    safe_headers = {str(key): str(value) for key, value in headers.items()}
-                    sink_results.append({"nodeId": node.id, **await _post_pipeline_egress(url, node_input, method=method, headers=safe_headers)})
             elif node.type == "output":
                 node_values[node.id] = node_input
             else:
                 node_values[node.id] = node_input
 
         outputs = [node_values[node.id] for node in graph.nodes if node.type == "output" and node.id in node_values]
-        output_rows.append(outputs[0] if len(outputs) == 1 else outputs if outputs else node_values.get(ordered[-1].id, source_row))
+        output_rows.append(
+            outputs[0] if len(outputs) == 1 else outputs if outputs else node_values.get(ordered[-1].id, source_row)
+        )
     return {"processed": output_rows, "sinks": sink_results}
 
 
 def _load_pipeline_model_choices() -> list[dict[str, Any]]:
-    choices: list[dict[str, Any]] = [{"id": _get_configured_model(), "label": "Default", "model": _get_configured_model()}]
-    path = Path(os.environ.get("AGENT_MODELS_CONFIG", "agent-models.json"))
-    try:
-        parsed = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        parsed = {}
-    if isinstance(parsed, dict):
-        entries: list[tuple[str, dict[str, Any]]] = []
-        default = parsed.get("default")
-        if isinstance(default, dict):
-            entries.append(("Configured default", default))
-        agents = parsed.get("agents")
-        if isinstance(agents, dict):
-            entries.extend((str(name), value) for name, value in agents.items() if isinstance(value, dict))
-        for label, entry in entries:
-            model = entry.get("model")
-            if isinstance(model, str) and model:
-                base_url = _resolve_pipeline_base_url(entry.get("base_url"))
-                choices.append({"id": f"{label}:{model}", "label": label, "model": model, "baseUrl": base_url})
-    deduped: dict[tuple[str, str | None], dict[str, Any]] = {}
-    for choice in choices:
-        key = (str(choice.get("model")), choice.get("baseUrl") if isinstance(choice.get("baseUrl"), str) else None)
-        deduped[key] = choice
-    return list(deduped.values())
+    return list_configured_pipeline_models()
 
 
 async def _get_user_workflow(session: AsyncSession, workflow_id: str, user_id: str) -> PipelineWorkflow:
@@ -1703,7 +1674,11 @@ async def chat_dbchat_connection(
             "and render query/chart artifacts separately. If the user asks about SQL itself, explain it normally. "
             "If the schema context is insufficient, say what table or column is needed. "
             f"Context mode: {context_mode}."
-            + (" In lock mode, use only the locked tables. " if context_mode == "lock" else " Suggested tables are hints only; all listed tables are available. ")
+            + (
+                " In lock mode, use only the locked tables. "
+                if context_mode == "lock"
+                else " Suggested tables are hints only; all listed tables are available. "
+            )
             + "\n\n"
             f"Connection: {adapter.title} ({adapter.connection_info().get('engineId', 'database')})\n"
             f"Schema context:\n{scope}"
@@ -1726,7 +1701,11 @@ async def chat_dbchat_connection(
         generated_sql = generated_sql or _extract_dbchat_sql(visible_answer)
         query_result: dict[str, Any] | None = None
         executed_sql: str | None = None
-        if generated_sql and (wants_rows or wants_chart) and _is_read_only_dbchat_sql(generated_sql):
+        if (
+            generated_sql
+            and (wants_rows or wants_chart)
+            and _is_read_only_dbchat_sql(generated_sql, adapter.engine.dialect.name)
+        ):
             if context_mode == "lock":
                 _validate_dbchat_lock_sql(generated_sql, selected_tables)
             query_result = adapter.query(generated_sql, limit=50)
@@ -1949,6 +1928,42 @@ async def execute_pipeline(
     return result
 
 
+IMAGE_ANALYSIS_MAX_FILES = 4
+IMAGE_ANALYSIS_MAX_FILE_BYTES = 5 * 1024 * 1024
+IMAGE_ANALYSIS_MAX_TOTAL_BYTES = 12 * 1024 * 1024
+IMAGE_ANALYSIS_MAX_PIXELS = 20_000_000
+IMAGE_ANALYSIS_MAX_DIMENSION = 10_000
+IMAGE_ANALYSIS_MAX_PROMPT_CHARS = 8_000
+IMAGE_FORMAT_MIME = {"JPEG": "image/jpeg", "PNG": "image/png", "WEBP": "image/webp"}
+
+
+def _validated_image_mime(file_bytes: bytes) -> str:
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(file_bytes)) as image:
+                image_format = (image.format or "").upper()
+                width, height = image.size
+                if image_format not in IMAGE_FORMAT_MIME:
+                    raise HTTPException(status_code=422, detail="Unsupported image format")
+                if (
+                    width <= 0
+                    or height <= 0
+                    or width > IMAGE_ANALYSIS_MAX_DIMENSION
+                    or height > IMAGE_ANALYSIS_MAX_DIMENSION
+                    or width * height > IMAGE_ANALYSIS_MAX_PIXELS
+                ):
+                    raise HTTPException(status_code=413, detail="Image dimensions are too large")
+                image.verify()
+                return IMAGE_FORMAT_MIME[image_format]
+    except HTTPException:
+        raise
+    except (Image.DecompressionBombError, Image.DecompressionBombWarning) as exc:
+        raise HTTPException(status_code=413, detail="Image dimensions are too large") from exc
+    except (UnidentifiedImageError, OSError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="Invalid image file") from exc
+
+
 @app.post("/custom/analyze-images")
 async def analyze_images(
     prompt: str = Form(""),
@@ -1956,44 +1971,45 @@ async def analyze_images(
     user: User = Depends(require_auth),
 ):
     """Analyze uploaded images and return a text description for text-only agent flows."""
-    if not files:
-        raise HTTPException(status_code=400, detail="No image files were provided")
-
-    content_blocks: list[dict[str, Any]] = [
-        {
-            "type": "text",
-            "text": (
-                "Analyze the uploaded image(s) for an agent workflow. "
-                "Describe the important visible facts, charts, tables, text, and context that would help answer the user's request. "
-                "Keep it concise but specific.\n\n"
-                f"User request: {prompt or 'Please analyze this image.'}"
-            ),
-        }
-    ]
-
-    valid_image_count = 0
-    for uploaded_file in files:
-        content_type = (uploaded_file.content_type or "").strip().lower()
-        if not content_type.startswith("image/"):
-            continue
-
-        file_bytes = await uploaded_file.read()
-        if not file_bytes:
-            continue
-
-        valid_image_count += 1
-        data_url = f"data:{content_type};base64,{base64.b64encode(file_bytes).decode('ascii')}"
-        content_blocks.append(
-            {
-                "type": "image_url",
-                "image_url": {"url": data_url, "detail": "low"},
-            }
-        )
-
-    if valid_image_count == 0:
-        raise HTTPException(status_code=400, detail="No valid image files were provided")
-
     try:
+        if not files:
+            raise HTTPException(status_code=400, detail="No image files were provided")
+        if len(files) > IMAGE_ANALYSIS_MAX_FILES:
+            raise HTTPException(status_code=413, detail="Too many image files")
+        if len(prompt) > IMAGE_ANALYSIS_MAX_PROMPT_CHARS:
+            raise HTTPException(status_code=413, detail="Image analysis prompt is too large")
+
+        content_blocks: list[dict[str, Any]] = [
+            {
+                "type": "text",
+                "text": (
+                    "Analyze the uploaded image(s) for an agent workflow. "
+                    "Describe the important visible facts, charts, tables, text, and context that would help answer the user's request. "
+                    "Keep it concise but specific.\n\n"
+                    f"User request: {prompt or 'Please analyze this image.'}"
+                ),
+            }
+        ]
+        total_bytes = 0
+        for uploaded_file in files:
+            file_bytes = await uploaded_file.read(IMAGE_ANALYSIS_MAX_FILE_BYTES + 1)
+            if not file_bytes:
+                raise HTTPException(status_code=422, detail="Image file is empty")
+            if len(file_bytes) > IMAGE_ANALYSIS_MAX_FILE_BYTES:
+                raise HTTPException(status_code=413, detail="Image file is too large")
+            total_bytes += len(file_bytes)
+            if total_bytes > IMAGE_ANALYSIS_MAX_TOTAL_BYTES:
+                raise HTTPException(status_code=413, detail="Image upload is too large")
+
+            content_type = _validated_image_mime(file_bytes)
+            data_url = f"data:{content_type};base64,{base64.b64encode(file_bytes).decode('ascii')}"
+            content_blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": data_url, "detail": "low"},
+                }
+            )
+
         model = load_chat_model(_get_configured_model())
         response = await model.ainvoke([HumanMessage(content=content_blocks)])
     except Exception as error:
@@ -2004,6 +2020,9 @@ async def analyze_images(
                 "user": user.identity,
             }
         raise
+    finally:
+        for uploaded_file in files:
+            await uploaded_file.close()
 
     return {
         "supported": True,
@@ -2159,7 +2178,12 @@ async def replace_executive_artifacts(
 
 # -- Articles / OpenSearch document ingestion endpoints --
 
-_ARTICLES_CONFIG_PATH = Path(__file__).resolve().parent / ".aegra-articles.json"
+ARTICLES_MAX_DOCUMENTS = 100
+ARTICLES_MAX_DOCUMENT_CHARS = 200_000
+ARTICLES_MAX_TOTAL_CHARS = 2_000_000
+ARTICLES_MAX_METADATA_BYTES = 20_000
+ARTICLES_MAX_QUERY_CHARS = 10_000
+ARTICLES_INDEX_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,99}$")
 
 
 def _read_bool_env(name: str, default: bool) -> bool:
@@ -2167,16 +2191,6 @@ def _read_bool_env(name: str, default: bool) -> bool:
     if value is None:
         return default
     return value.strip().lower() in {"1", "true", "yes", "on"}
-
-
-class ArticlesConfigRequest(BaseModel):
-    opensearch_url: str
-    opensearch_user: str
-    opensearch_password: str
-    embedding_model: str
-    use_ssl: bool = False
-    verify_certs: bool = True
-    ssl_assert_hostname: bool = True
 
 
 class ArticlesConfigResponse(BaseModel):
@@ -2189,13 +2203,13 @@ class ArticlesConfigResponse(BaseModel):
 
 
 class IngestDocumentRequest(BaseModel):
-    content: str
+    content: str = Field(min_length=1, max_length=ARTICLES_MAX_DOCUMENT_CHARS)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class IngestDocumentsRequest(BaseModel):
-    index: str
-    documents: list[IngestDocumentRequest]
+    index: str = Field(min_length=1, max_length=100)
+    documents: list[IngestDocumentRequest] = Field(min_length=1, max_length=ARTICLES_MAX_DOCUMENTS)
     force: bool = False
 
 
@@ -2235,16 +2249,30 @@ def _load_articles_config() -> dict[str, Any] | None:
             "ssl_assert_hostname": _read_bool_env("KMS_OPENSEARCH_SSL_ASSERT_HOSTNAME", True),
         }
 
-    if not _ARTICLES_CONFIG_PATH.exists():
-        return None
-    try:
-        return json.loads(_ARTICLES_CONFIG_PATH.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return None
+    return None
 
 
-def _save_articles_config(data: dict[str, Any]) -> None:
-    _ARTICLES_CONFIG_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+def _require_articles_admin(user: User = Depends(require_auth)) -> User:
+    if not has_superadmin_access(user.permissions):
+        raise HTTPException(status_code=403, detail="SuperAdmin permission is required")
+    return user
+
+
+def _articles_index_name(value: str) -> str:
+    index_name = value.strip()
+    prefix = os.environ.get("ARTICLES_INDEX_PREFIX", "articles-").strip()
+    if not ARTICLES_INDEX_PATTERN.fullmatch(index_name) or (prefix and not index_name.startswith(prefix)):
+        raise HTTPException(status_code=422, detail="Invalid articles index name")
+    return index_name
+
+
+def _validate_articles_documents(documents: list[IngestDocumentRequest]) -> None:
+    if sum(len(document.content) for document in documents) > ARTICLES_MAX_TOTAL_CHARS:
+        raise HTTPException(status_code=413, detail="Articles payload is too large")
+    for document in documents:
+        metadata_size = len(json.dumps(document.metadata, ensure_ascii=False, default=str).encode("utf-8"))
+        if metadata_size > ARTICLES_MAX_METADATA_BYTES:
+            raise HTTPException(status_code=413, detail="Article metadata is too large")
 
 
 @lru_cache(maxsize=8)
@@ -2296,8 +2324,8 @@ def _articles_index_metadata(mapping: dict[str, Any], index_name: str) -> dict[s
 
 
 @app.get("/custom/articles/config")
-async def get_articles_config(user: User = Depends(require_auth)):
-    """Return the persisted articles OpenSearch connection config (without password)."""
+async def get_articles_config(user: User = Depends(_require_articles_admin)):
+    """Return immutable server-owned OpenSearch configuration metadata."""
     data = _load_articles_config()
     if not data:
         raise HTTPException(status_code=404, detail="No articles config saved yet")
@@ -2313,47 +2341,32 @@ async def get_articles_config(user: User = Depends(require_auth)):
 
 @app.post("/custom/articles/config")
 async def save_articles_config(
-    request: ArticlesConfigRequest,
-    user: User = Depends(require_auth),
+    user: User = Depends(_require_articles_admin),
 ):
-    """Persist the articles OpenSearch connection config for future use."""
-    data = request.model_dump()
-    _save_articles_config(data)
-    logger.info(
-        "Articles config saved by user=%s url=%s model=%s",
-        user.identity,
-        request.opensearch_url,
-        request.embedding_model,
-    )
-    return ArticlesConfigResponse(
-        opensearch_url=data["opensearch_url"],
-        opensearch_user=data["opensearch_user"],
-        embedding_model=data["embedding_model"],
-        use_ssl=data.get("use_ssl", False),
-        verify_certs=data.get("verify_certs", True),
-        ssl_assert_hostname=data.get("ssl_assert_hostname", True),
-    ).model_dump()
+    """Reject runtime provider configuration changes."""
+    raise HTTPException(status_code=405, detail="Articles configuration is server-managed")
 
 
 @app.get("/custom/articles/indexes")
-async def list_articles_indexes(user: User = Depends(require_auth)):
+async def list_articles_indexes(user: User = Depends(_require_articles_admin)):
     """List all OpenSearch indexes with document counts and embedding model metadata."""
     config = _load_articles_config()
     if not config:
-        raise HTTPException(status_code=400, detail="No articles config saved. POST /custom/articles/config first.")
+        raise HTTPException(status_code=503, detail="Articles service is not configured")
 
     client = _opensearch_client(config)
     try:
         all_indexes = client.indices.get_alias(index="*")
     except TransportError as exc:
         logger.error("Failed to list OpenSearch indexes: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Could not access the articles search service") from exc
 
     indexes = []
     for index_name in sorted(all_indexes.keys()):
+        try:
+            _articles_index_name(index_name)
+        except HTTPException:
+            continue
         info: dict[str, Any] = {"name": index_name}
         try:
             stats = client.count(index=index_name)
@@ -2375,12 +2388,14 @@ async def list_articles_indexes(user: User = Depends(require_auth)):
 @app.post("/custom/articles/indexes")
 async def create_articles_index(
     index_name: str = Query(..., description="Name for the new index"),
-    user: User = Depends(require_auth),
+    user: User = Depends(_require_articles_admin),
 ):
     """Create a new OpenSearch index with embedding model metadata."""
     config = _load_articles_config()
     if not config:
-        raise HTTPException(status_code=400, detail="No articles config saved. POST /custom/articles/config first.")
+        raise HTTPException(status_code=503, detail="Articles service is not configured")
+
+    index_name = _articles_index_name(index_name)
 
     client = _opensearch_client(config)
 
@@ -2389,10 +2404,7 @@ async def create_articles_index(
             raise HTTPException(status_code=409, detail=f"Index '{index_name}' already exists")
     except TransportError as exc:
         logger.error("Failed to check index existence: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Could not access the articles search service") from exc
 
     try:
         client.indices.create(
@@ -2410,10 +2422,7 @@ async def create_articles_index(
         )
     except TransportError as exc:
         logger.error("Failed to create index %s: %s", index_name, exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to create index: {exc.error or str(exc)}",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Could not create the articles index") from exc
 
     logger.info("Created articles index=%s by user=%s model=%s", index_name, user.identity, config["embedding_model"])
     return {"ok": True, "index": index_name, "embeddingModel": config["embedding_model"]}
@@ -2422,33 +2431,30 @@ async def create_articles_index(
 @app.post("/custom/articles/ingest")
 async def ingest_articles(
     request: IngestDocumentsRequest,
-    user: User = Depends(require_auth),
+    user: User = Depends(_require_articles_admin),
 ):
     """Ingest documents into an OpenSearch index with optional embedding model validation."""
     config = _load_articles_config()
     if not config:
-        raise HTTPException(status_code=400, detail="No articles config saved. POST /custom/articles/config first.")
+        raise HTTPException(status_code=503, detail="Articles service is not configured")
 
-    if not request.documents:
-        raise HTTPException(status_code=400, detail="No documents provided")
+    index_name = _articles_index_name(request.index)
+    _validate_articles_documents(request.documents)
 
     client = _opensearch_client(config)
 
     try:
-        if not client.indices.exists(index=request.index):
-            raise HTTPException(status_code=404, detail=f"Index '{request.index}' does not exist")
+        if not client.indices.exists(index=index_name):
+            raise HTTPException(status_code=404, detail="Articles index does not exist")
     except TransportError as exc:
         logger.error("Failed to check index existence: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Could not access the articles search service") from exc
 
     # Check embedding model mismatch
     if not request.force:
         try:
-            mapping = client.indices.get_mapping(index=request.index)
-            stored_model = _articles_index_metadata(mapping, request.index).get("embedding_model")
+            mapping = client.indices.get_mapping(index=index_name)
+            stored_model = _articles_index_metadata(mapping, index_name).get("embedding_model")
             if stored_model and stored_model != config["embedding_model"]:
                 raise HTTPException(
                     status_code=400,
@@ -2464,56 +2470,48 @@ async def ingest_articles(
             pass
 
     try:
-        vector_store = _vector_store_for_index(request.index, config)
+        vector_store = _vector_store_for_index(index_name, config)
         documents = [Document(page_content=doc.content, metadata=doc.metadata) for doc in request.documents]
         vector_store.add_documents(documents)
     except Exception as exc:
-        logger.error("Failed to ingest documents into %s: %s", request.index, exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to ingest documents: {exc}",
-        ) from exc
+        logger.error("Failed to ingest documents into %s: %s", index_name, exc)
+        raise HTTPException(status_code=502, detail="Could not ingest articles") from exc
 
     logger.info(
         "Ingested %d documents into index=%s by user=%s",
         len(request.documents),
-        request.index,
+        index_name,
         user.identity,
     )
-    return {"ok": True, "index": request.index, "ingested": len(request.documents)}
+    return {"ok": True, "index": index_name, "ingested": len(request.documents)}
 
 
 class ArticleChatRequest(BaseModel):
-    message: str
-    index_name: str
+    message: str = Field(min_length=1, max_length=ARTICLES_MAX_QUERY_CHARS)
+    index_name: str = Field(min_length=1, max_length=100)
     force: bool = False
 
 
 @app.post("/custom/articles/chat")
 async def article_chat(
     request: ArticleChatRequest,
-    user: User = Depends(require_auth),
+    user: User = Depends(_require_articles_admin),
 ):
     """Chat with AI over a selected OpenSearch index. Retrieval runs automatically."""
     config = _load_articles_config()
     if not config:
-        raise HTTPException(status_code=400, detail="No articles config saved. Configure indexes first.")
+        raise HTTPException(status_code=503, detail="Articles service is not configured")
 
-    index_name = request.index_name.strip()
-    if not index_name:
-        raise HTTPException(status_code=400, detail="No index selected. Choose an index before chatting.")
+    index_name = _articles_index_name(request.index_name)
 
     client = _opensearch_client(config)
 
     try:
         if not client.indices.exists(index=index_name):
-            raise HTTPException(status_code=404, detail=f"Index '{index_name}' does not exist")
+            raise HTTPException(status_code=404, detail="Articles index does not exist")
     except TransportError as exc:
         logger.error("Failed to check index existence: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Failed to connect to OpenSearch: {exc.error or str(exc)}",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Could not access the articles search service") from exc
 
     # Check embedding model mismatch
     if not request.force:
@@ -2539,10 +2537,7 @@ async def article_chat(
         results = vector_store.similarity_search(query, k=5)
     except Exception as exc:
         logger.error("Failed to query index %s: %s", index_name, exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Could not query index '{index_name}': {exc}",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Could not query the articles index") from exc
 
     if not results:
         context_text = ""
@@ -2561,10 +2556,7 @@ async def article_chat(
         answer = get_message_text(response).strip()
     except Exception as exc:
         logger.error("Model generation failed: %s", exc)
-        raise HTTPException(
-            status_code=502,
-            detail=f"Model generation failed: {exc}",
-        ) from exc
+        raise HTTPException(status_code=502, detail="Could not generate an article response") from exc
 
     logger.info(
         "Article chat completed index=%s user=%s",

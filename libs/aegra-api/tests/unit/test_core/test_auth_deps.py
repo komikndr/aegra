@@ -79,7 +79,7 @@ class TestRequireAuth:
                 await require_auth(mock_request)
 
             assert exc_info.value.status_code == 401
-            assert "Auth error" in exc_info.value.detail
+            assert exc_info.value.detail == "Authentication failed"
 
     @pytest.mark.asyncio
     async def test_require_auth_preserves_custom_fields(self):

@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 import structlog
 from asgi_correlation_id import correlation_id
 from redis import RedisError
+from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
 
 from aegra_api.core.active_runs import active_runs
@@ -26,7 +27,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
-from aegra_api.observability.span_enrichment import set_trace_context
+from aegra_api.observability.span_enrichment import merge_run_metadata, set_trace_context
 from aegra_api.services.base_executor import BaseExecutor
 from aegra_api.services.run_executor import _lease_loss_cancellations, execute_run
 from aegra_api.services.run_status import finalize_run, update_run_status
@@ -253,7 +254,9 @@ class WorkerExecutor(BaseExecutor):
             result = await client.blpop(settings.worker.WORKER_QUEUE_KEY, timeout=5)  # type: ignore[arg-type]
             if result is None:
                 return None
-            return result[1]  # type: ignore[return-value]
+            return result[1]
+        except RedisTimeoutError:
+            return None
         except RedisError as exc:
             logger.warning("Redis BLPOP failed, falling back to Postgres poll", error=str(exc))
             await asyncio.sleep(settings.worker.POSTGRES_POLL_INTERVAL_SECONDS)
@@ -474,16 +477,19 @@ def _restore_trace_context(run_id: str, job: RunJob, trace: dict[str, str]) -> N
     if original_request_id:
         correlation_id.set(original_request_id)
 
+    system_metadata: dict[str, str | int | float | bool] = {
+        "run_id": run_id,
+        "thread_id": job.identity.thread_id,
+        "graph_id": job.identity.graph_id,
+    }
+    if original_request_id:
+        system_metadata["original_request_id"] = original_request_id
+
     set_trace_context(
         user_id=job.user.identity,
         session_id=job.identity.thread_id,
         trace_name=job.identity.graph_id,
-        metadata={
-            "run_id": run_id,
-            "thread_id": job.identity.thread_id,
-            "graph_id": job.identity.graph_id,
-            "original_request_id": original_request_id,
-        },
+        metadata=merge_run_metadata(job.run_metadata, system_metadata),
     )
 
     structlog.contextvars.bind_contextvars(

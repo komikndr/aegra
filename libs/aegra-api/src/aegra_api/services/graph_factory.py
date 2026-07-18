@@ -286,7 +286,8 @@ def coerce_context(context: dict[str, Any] | None, graph_id: str) -> Any:
         if _is_pydantic_model(ctx_type):
             return ctx_type.model_validate(context)
         if dataclasses.is_dataclass(ctx_type):
-            return ctx_type(**context)
+            init_fields = {field.name for field in dataclasses.fields(ctx_type) if field.init}
+            return ctx_type(**{key: value for key, value in context.items() if key in init_fields})
     except Exception as exc:
         logger.warning(
             "context_coercion_failed",

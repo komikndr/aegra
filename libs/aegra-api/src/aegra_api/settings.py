@@ -61,6 +61,7 @@ class AppSettings(EnvBase):
     AUTH_TYPE: LowerStr = "noop"
     ENV_MODE: UpperStr = "LOCAL"
     DEBUG: bool = False
+    RUN_MIGRATIONS_ON_STARTUP: bool = True
 
     # Logging
     LOG_LEVEL: UpperStr = "INFO"
@@ -74,6 +75,12 @@ class AppSettings(EnvBase):
         if not self.LOG_EXCLUDE_PATHS:
             return ()
         return tuple(part.strip() for part in self.LOG_EXCLUDE_PATHS.split(",") if part.strip())
+
+    @computed_field
+    @property
+    def sse_ping_interval_secs(self) -> int:
+        """Return the keepalive interval accepted by EventSourceResponse."""
+        return max(1, int(self.KEEPALIVE_INTERVAL_SECS))
 
 
 class DatabaseSettings(EnvBase):
@@ -270,6 +277,12 @@ class WorkerSettings(EnvBase):
         return self
 
 
+class EventStreamingSettings(EnvBase):
+    """Agent Protocol v2 event streaming feature controls."""
+
+    FF_V2_EVENT_STREAMING: bool = True
+
+
 class Settings:
     def __init__(self) -> None:
         self.app = AppSettings()
@@ -278,6 +291,7 @@ class Settings:
         self.observability = ObservabilitySettings()
         self.redis = RedisSettings()
         self.worker = WorkerSettings()
+        self.event_streaming = EventStreamingSettings()
 
 
 settings = Settings()

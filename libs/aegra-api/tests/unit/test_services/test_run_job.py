@@ -23,12 +23,13 @@ class TestRunIdentity:
 class TestRunExecution:
     def test_defaults(self) -> None:
         execution = RunExecution()
-        assert execution.input_data == {}
+        assert execution.input_data is None
         assert execution.config == {}
         assert execution.context == {}
         assert execution.stream_mode is None
         assert execution.checkpoint is None
         assert execution.command is None
+        assert execution.event_streaming_v2 is False
 
     def test_with_values(self) -> None:
         execution = RunExecution(
@@ -70,6 +71,7 @@ class TestRunJob:
                 interrupt_after=None,
                 subgraphs=True,
             ),
+            run_metadata={"tenant": "onyx"},
         )
 
     def test_roundtrip_model_dump_validate(self, sample_job: RunJob) -> None:
@@ -91,12 +93,25 @@ class TestRunJob:
         assert restored.user.identity == sample_job.user.identity
         assert restored.execution == sample_job.execution
         assert restored.behavior == sample_job.behavior
+        assert restored.run_metadata == {"tenant": "onyx"}
 
     def test_execution_params_includes_graph_id(self, sample_job: RunJob) -> None:
         params = sample_job.to_execution_params()
         assert params["graph_id"] == "graph-1"
         assert "run_id" not in params
         assert "thread_id" not in params
+        assert params["run_metadata"] == {"tenant": "onyx"}
+
+    def test_legacy_execution_params_default_run_metadata(self, sample_job: RunJob) -> None:
+        params = sample_job.to_execution_params()
+        params.pop("run_metadata")
+
+        class FakeORM:
+            run_id = "run-1"
+            thread_id = "thread-1"
+            execution_params = params
+
+        assert RunJob.from_run_orm(FakeORM()).run_metadata == {}
 
     def test_extra_user_fields_preserved(self) -> None:
         """User model allows extra fields (ConfigDict extra='allow')."""
@@ -121,5 +136,5 @@ class TestRunJob:
             identity=RunIdentity(run_id="r1", thread_id="t1", graph_id="g1"),
             user=User(identity="u1"),
         )
-        assert job.execution.input_data == {}
+        assert job.execution.input_data is None
         assert job.behavior.subgraphs is False

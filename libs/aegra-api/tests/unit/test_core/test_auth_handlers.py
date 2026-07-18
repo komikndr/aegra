@@ -273,7 +273,7 @@ class TestHandleEvent:
 
     @pytest.mark.asyncio
     async def test_handler_raises_unexpected_exception(self):
-        """Test that handler raising unexpected exception returns 500"""
+        """Unexpected handler errors propagate without exposing their text."""
         user = User(identity="user-123")
         ctx = build_auth_context(user, "threads", "create")
 
@@ -283,15 +283,14 @@ class TestHandleEvent:
         mock_auth._global_handlers = []
         mock_auth._handler_cache = {}
 
-        with patch(
-            "aegra_api.core.auth_handlers.get_auth_instance",
-            return_value=mock_auth,
+        with (
+            patch(
+                "aegra_api.core.auth_handlers.get_auth_instance",
+                return_value=mock_auth,
+            ),
+            pytest.raises(ValueError, match="Unexpected error"),
         ):
-            with pytest.raises(HTTPException) as exc_info:
-                await handle_event(ctx, {})
-
-            assert exc_info.value.status_code == 500
-            assert "Authorization error" in exc_info.value.detail
+            await handle_event(ctx, {})
 
     @pytest.mark.asyncio
     async def test_handler_returns_invalid_type(self):

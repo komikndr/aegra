@@ -28,6 +28,12 @@ def create_get_graph_mock(return_value=None, side_effect=None):
 class TestGetThreadState:
     """Exercise edge cases and success path for get_thread_state."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_graph_access(self):
+        """Keep state tests focused on checkpoint behavior, not graph policy."""
+        with patch("aegra_api.api.threads.ensure_graph_access"):
+            yield
+
     @pytest.mark.asyncio
     async def test_thread_not_found(self):
         """404 returned when the thread is missing for the user."""

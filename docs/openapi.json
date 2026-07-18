@@ -3,7 +3,7 @@
   "info": {
     "title": "Aegra",
     "description": "Production-ready Agent Protocol server",
-    "version": "0.9.6"
+    "version": "0.9.24+onyx.1"
   },
   "paths": {
     "/info": {
@@ -1090,7 +1090,7 @@
           "Threads"
         ],
         "summary": "Update Thread State",
-        "description": "Update thread state or retrieve it via POST.\n\nWhen `values` is provided, creates a new checkpoint with the updated state.\nUse `as_node` to attribute the update to a specific graph node. When\n`values` is null, this endpoint acts as a POST-based alternative to the\nGET state endpoint (useful when passing complex checkpoint/subgraph\nparameters in the request body).",
+        "description": "Update thread state or retrieve it via POST.\n\nWhen `values` is provided, creates a new checkpoint with the updated state.\nUse `as_node` to attribute the update to a specific graph node. When\n`values` is null and no checkpoint target or node is provided, this endpoint\nacts as a POST-based alternative to the GET state endpoint.\n\nA null `values` payload with `as_node` or a checkpoint target creates a new\ncheckpoint derived from that target, which supports Studio's fork flow.",
         "operationId": "update_thread_state_threads__thread_id__state_post",
         "parameters": [
           {
@@ -2811,6 +2811,121 @@
           }
         }
       }
+    },
+    "/threads/{thread_id}/stream/events": {
+      "post": {
+        "tags": [
+          "Event Streaming"
+        ],
+        "summary": "Stream Thread Events",
+        "description": "Open a channel-filtered SSE stream of the thread's run events.\n\nThread-scoped: events for any run on the thread flow through, so a\nclient can open the stream then issue ``run.start``. Each SSE frame's\n``data:`` is a protocol event envelope; ``id:`` is the ``seq`` a client\nechoes back as ``since`` on resume.\n\nDB work runs in short-lived sessions (the upfront ownership check here, and\neach run-lister poll) so no connection is held for the SSE lifetime (#423).",
+        "operationId": "stream_thread_events_threads__thread_id__stream_events_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EventStreamRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "SSE stream of protocol event envelopes",
+            "content": {
+              "text/event-stream": {}
+            }
+          },
+          "400": {
+            "description": "Invalid request (unsupported channels, malformed command)"
+          },
+          "404": {
+            "description": "Thread owned by another user"
+          },
+          "503": {
+            "description": "v2 disabled by flag, or runtime too old for native v3 events"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/threads/{thread_id}/commands": {
+      "post": {
+        "tags": [
+          "Event Streaming"
+        ],
+        "summary": "Post Thread Command",
+        "description": "Run a single v2 command on the thread and return its response envelope.\n\nUses a short-lived session (the run created by ``run.start`` executes on\nthe worker; the response returns before streaming begins).",
+        "operationId": "post_thread_command_threads__thread_id__commands_post",
+        "parameters": [
+          {
+            "name": "thread_id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "title": "Thread Id"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ThreadCommand"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Protocol response envelope (success or error)",
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            }
+          },
+          "404": {
+            "description": "Thread owned by another user"
+          },
+          "503": {
+            "description": "v2 disabled by flag, or runtime too old for native v3 events"
+          },
+          "422": {
+            "description": "Validation Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -2885,6 +3000,33 @@
         ],
         "title": "AgentSchemas",
         "description": "Agent schema definitions for client integration"
+      },
+      "AnalyticDatabaseHealth": {
+        "properties": {
+          "status": {
+            "type": "string",
+            "title": "Status",
+            "description": "Analytics source connection status."
+          },
+          "engine": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Engine",
+            "description": "Configured analytics database engine."
+          }
+        },
+        "type": "object",
+        "required": [
+          "status"
+        ],
+        "title": "AnalyticDatabaseHealth",
+        "description": "Configured analytics source status, without connection credentials."
       },
       "Assistant": {
         "properties": {
@@ -3177,6 +3319,40 @@
             "title": "Metadata",
             "description": "Metadata to use for searching and filtering assistants.",
             "default": {}
+          },
+          "sort_by": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "created_at",
+                  "updated_at",
+                  "name",
+                  "assistant_id"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort By",
+            "description": "Field used to sort results"
+          },
+          "sort_order": {
+            "anyOf": [
+              {
+                "type": "string",
+                "enum": [
+                  "asc",
+                  "desc"
+                ]
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Sort Order",
+            "description": "Sort direction"
           }
         },
         "type": "object",
@@ -3224,10 +3400,16 @@
             "default": {}
           },
           "graph_id": {
-            "type": "string",
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Graph Id",
-            "description": "The ID of the graph",
-            "default": "agent"
+            "description": "The ID of the graph"
           },
           "context": {
             "anyOf": [
@@ -3276,6 +3458,68 @@
         ],
         "title": "Body_set_assistant_latest_assistants__assistant_id__latest_post"
       },
+      "EventStreamRequest": {
+        "properties": {
+          "channels": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array",
+            "title": "Channels",
+            "description": "Channels to subscribe to (e.g. messages, values, lifecycle)."
+          },
+          "namespaces": {
+            "anyOf": [
+              {
+                "items": {
+                  "items": {
+                    "type": "string"
+                  },
+                  "type": "array"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Namespaces",
+            "description": "Subgraph namespace prefixes to include."
+          },
+          "depth": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Depth",
+            "description": "Max subgraph nesting depth to include."
+          },
+          "since": {
+            "anyOf": [
+              {
+                "type": "integer",
+                "minimum": 0.0
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Since",
+            "description": "Last seq the client saw; events at or below it are skipped on resume."
+          }
+        },
+        "type": "object",
+        "required": [
+          "channels"
+        ],
+        "title": "EventStreamRequest",
+        "description": "Body for ``POST /threads/{thread_id}/stream/events``.\n\nThread-scoped, matching the LangGraph SDK: no run id \u2014 the stream\ncarries events for whatever run(s) execute on the thread."
+      },
       "HTTPValidationError": {
         "properties": {
           "detail": {
@@ -3310,6 +3554,10 @@
             "type": "string",
             "title": "Langgraph Store",
             "description": "Store backend connection status."
+          },
+          "analytic_database": {
+            "$ref": "#/components/schemas/AnalyticDatabaseHealth",
+            "description": "Configured analytics database status."
           }
         },
         "type": "object",
@@ -3317,7 +3565,8 @@
           "status",
           "database",
           "langgraph_checkpointer",
-          "langgraph_store"
+          "langgraph_store",
+          "analytic_database"
         ],
         "title": "HealthResponse",
         "description": "Health check response model"
@@ -3386,10 +3635,17 @@
             "default": "pending"
           },
           "input": {
-            "additionalProperties": true,
-            "type": "object",
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
             "title": "Input",
-            "description": "Input data provided to the run."
+            "description": "Input data provided to the run. None for checkpoint-only resume."
           },
           "output": {
             "anyOf": [
@@ -3465,7 +3721,6 @@
           "run_id",
           "thread_id",
           "assistant_id",
-          "input",
           "user_id",
           "created_at",
           "updated_at"
@@ -3669,7 +3924,7 @@
               }
             ],
             "title": "Metadata",
-            "description": "Request metadata (e.g., from_studio flag)"
+            "description": "Primitive request metadata propagated to OTEL trace attributes. Keys must match [A-Za-z0-9_-]{1,64}; strings are limited to 512 characters; at most 32 keys are accepted."
           }
         },
         "type": "object",
@@ -4129,6 +4384,33 @@
         ],
         "title": "ThreadCheckpointPostRequest",
         "description": "Request model for fetching thread checkpoint"
+      },
+      "ThreadCommand": {
+        "properties": {
+          "id": {
+            "type": "integer",
+            "title": "Id",
+            "description": "Client-assigned command id, echoed in the response."
+          },
+          "method": {
+            "type": "string",
+            "title": "Method",
+            "description": "Command method, e.g. run.start or input.respond."
+          },
+          "params": {
+            "additionalProperties": true,
+            "type": "object",
+            "title": "Params",
+            "description": "Method parameters."
+          }
+        },
+        "type": "object",
+        "required": [
+          "id",
+          "method"
+        ],
+        "title": "ThreadCommand",
+        "description": "Body for ``POST /threads/{thread_id}/commands`` (JSON-RPC style)."
       },
       "ThreadCreate": {
         "properties": {
@@ -4696,6 +4978,10 @@
     {
       "name": "Store",
       "description": "Persistent key-value and semantic storage available from any thread."
+    },
+    {
+      "name": "Event Streaming",
+      "description": "Agent Protocol v2 thread event streaming and commands."
     },
     {
       "name": "Health",

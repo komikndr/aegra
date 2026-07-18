@@ -1,7 +1,5 @@
 """Integration tests for assistants CRUD operations"""
 
-from unittest.mock import AsyncMock, patch
-
 import pytest
 
 from aegra_api.services.assistant_service import get_assistant_service
@@ -22,11 +20,7 @@ def client(mock_assistant_service):
     # Override the service dependency
     app.dependency_overrides[get_assistant_service] = lambda: mock_assistant_service
 
-    # Mock authorization handlers to allow all requests in integration tests
-    # These tests focus on API layer, not authorization layer
-    with patch("aegra_api.api.assistants.handle_event", new_callable=AsyncMock) as mock_handle:
-        mock_handle.return_value = None  # Allow all requests
-        yield make_client(app)
+    yield make_client(app)
 
 
 class TestCreateAssistant:
@@ -246,7 +240,7 @@ class TestDeleteAssistant:
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "deleted"
-        mock_assistant_service.delete_assistant.assert_called_once_with("test-assistant-123", "test-user")
+        mock_assistant_service.delete_assistant.assert_called_once_with("test-assistant-123")
 
     def test_delete_assistant_not_found(self, client, mock_assistant_service):
         """Test deleting non-existent assistant"""

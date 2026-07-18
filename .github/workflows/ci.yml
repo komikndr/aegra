@@ -57,6 +57,9 @@ jobs:
         run: uv run bandit -c pyproject.toml -r libs/aegra-api/src/
         continue-on-error: true
 
+      - name: Check OpenAPI schema drift
+        run: uv run --package aegra-api python scripts/export_openapi.py --check
+
       - name: Run tests with pytest
         env:
           AEGRA_CONFIG: ""

@@ -53,6 +53,7 @@ def _make_request() -> MagicMock:
     request.interrupt_after = None
     request.multitask_strategy = None
     request.stream_subgraphs = False
+    request.metadata = None
     return request
 
 
@@ -111,6 +112,12 @@ _PREPARE_RUN_PATCHES = {
 class TestWaitForRunExceptionPaths:
     """Test exception handling and edge cases in wait_for_run endpoint."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_graph_access(self):
+        """Keep wait tests focused on run behavior, not graph policy."""
+        with patch("aegra_api.services.run_preparation.ensure_graph_access"):
+            yield
+
     @pytest.mark.asyncio
     async def test_wait_for_run_timeout(self) -> None:
         """Test that TimeoutError is handled gracefully and returns current state."""
@@ -122,7 +129,7 @@ class TestWaitForRunExceptionPaths:
         # Pre-execution session (for _prepare_run)
         session_1 = AsyncMock()
         session_1.add = MagicMock()
-        session_1.scalar.return_value = _make_assistant()
+        session_1.scalar.side_effect = [None, _make_assistant()]
 
         # Post-wait session (for _fetch_run_output)
         session_2 = AsyncMock()
@@ -167,7 +174,7 @@ class TestWaitForRunExceptionPaths:
 
         session_1 = AsyncMock()
         session_1.add = MagicMock()
-        session_1.scalar.return_value = _make_assistant()
+        session_1.scalar.side_effect = [None, _make_assistant()]
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(run_id, thread_id, output={"result": "success"})
@@ -208,7 +215,7 @@ class TestWaitForRunExceptionPaths:
 
         session_1 = AsyncMock()
         session_1.add = MagicMock()
-        session_1.scalar.return_value = _make_assistant()
+        session_1.scalar.side_effect = [None, _make_assistant()]
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(
@@ -256,7 +263,7 @@ class TestWaitForRunExceptionPaths:
 
         session_1 = AsyncMock()
         session_1.add = MagicMock()
-        session_1.scalar.return_value = _make_assistant()
+        session_1.scalar.side_effect = [None, _make_assistant()]
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(
@@ -301,8 +308,9 @@ class TestWaitForRunExceptionPaths:
 
         session = AsyncMock()
         session.add = MagicMock()
-        session.scalar.return_value = _make_assistant()
-        session.scalar.return_value.graph_id = "nonexistent-graph"
+        assistant = _make_assistant()
+        assistant.graph_id = "nonexistent-graph"
+        session.scalar.side_effect = [None, assistant]
 
         mock_maker = _make_session_maker(session)
 
@@ -334,7 +342,7 @@ class TestWaitForRunExceptionPaths:
 
         session_1 = AsyncMock()
         session_1.add = MagicMock()
-        session_1.scalar.return_value = _make_assistant()
+        session_1.scalar.side_effect = [None, _make_assistant()]
 
         session_2 = AsyncMock()
         session_2.scalar.return_value = _make_run_orm(run_id, thread_id, output={"ok": True})

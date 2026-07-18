@@ -4,6 +4,8 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from redis import ConnectionError as RedisConnectionError
+from redis import TimeoutError as RedisTimeoutError
 
 from aegra_api.core.active_runs import active_runs
 from aegra_api.models.auth import User
@@ -352,6 +354,18 @@ class TestRestoreTraceContext:
         assert call_kwargs["user_id"] == "test-user"
         assert call_kwargs["session_id"] == "11111111-2222-3333-4444-555555555555"
         assert call_kwargs["trace_name"] == "test-graph"
+        assert call_kwargs["metadata"]["original_request_id"] == "req-abc"
+
+    def test_merges_run_metadata_without_overriding_system_fields(self) -> None:
+        job = _make_run_job().model_copy(update={"run_metadata": {"tenant": "onyx", "run_id": "spoofed"}})
+
+        with patch(f"{MODULE}.set_trace_context") as mock_set_trace:
+            _restore_trace_context("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", job, {})
+
+        metadata = mock_set_trace.call_args.kwargs["metadata"]
+        assert metadata["tenant"] == "onyx"
+        assert metadata["run_id"] == "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        assert "original_request_id" not in metadata
 
     def test_clears_previous_context_before_setting_new(self) -> None:
         job = _make_run_job()
@@ -599,3 +613,36 @@ class TestExecuteWithLease:
             await task  # Completes normally (CancelledError is handled internally)
 
         assert job_task_was_cancelled, "job_task must be cancelled when _execute_with_lease is cancelled"
+
+
+class TestDequeue:
+    @pytest.mark.asyncio
+    async def test_idle_socket_timeout_does_not_poll_postgres(self) -> None:
+        executor = WorkerExecutor()
+        executor._poll_postgres = AsyncMock(return_value="fallback")  # type: ignore[method-assign]
+        client = MagicMock()
+        client.blpop = AsyncMock(side_effect=RedisTimeoutError("idle"))
+
+        with (
+            patch(f"{MODULE}.redis_manager.get_client", return_value=client),
+            patch(f"{MODULE}.logger.warning") as warning,
+        ):
+            assert await executor._dequeue() is None
+
+        executor._poll_postgres.assert_not_awaited()
+        warning.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_connection_failure_falls_back_to_postgres(self) -> None:
+        executor = WorkerExecutor()
+        executor._poll_postgres = AsyncMock(return_value="fallback")  # type: ignore[method-assign]
+        client = MagicMock()
+        client.blpop = AsyncMock(side_effect=RedisConnectionError("down"))
+
+        with (
+            patch(f"{MODULE}.redis_manager.get_client", return_value=client),
+            patch(f"{MODULE}.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            assert await executor._dequeue() == "fallback"
+
+        executor._poll_postgres.assert_awaited_once()

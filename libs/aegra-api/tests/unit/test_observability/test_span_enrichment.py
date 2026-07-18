@@ -9,6 +9,7 @@ from aegra_api.observability.span_enrichment import (
     SpanEnrichmentProcessor,
     _trace_attrs,
     make_run_trace_context,
+    merge_run_metadata,
     set_trace_context,
 )
 
@@ -30,6 +31,9 @@ class TestSetTraceContext:
         assert attrs["langfuse.session.id"] == "thread-1"
         assert attrs["session.id"] == "thread-1"
         assert attrs["langfuse.trace.name"] == "my_graph"
+        assert attrs["aegra.user.id"] == "user-1"
+        assert attrs["aegra.thread.id"] == "thread-1"
+        assert attrs["aegra.graph.id"] == "my_graph"
 
     def test_skips_none_values(self) -> None:
         """None arguments are not stored; only provided values appear."""
@@ -53,7 +57,10 @@ class TestSetTraceContext:
         set_trace_context(trace_name="matter_agent")
 
         attrs = _trace_attrs.get()
-        assert attrs == {"langfuse.trace.name": "matter_agent"}
+        assert attrs == {
+            "langfuse.trace.name": "matter_agent",
+            "aegra.graph.id": "matter_agent",
+        }
 
     def test_metadata_stored_with_langfuse_prefix(self) -> None:
         """metadata dict keys are stored as langfuse.trace.metadata.<key>."""
@@ -65,6 +72,8 @@ class TestSetTraceContext:
         attrs = _trace_attrs.get()
         assert attrs["langfuse.trace.metadata.run_id"] == "run-abc"
         assert attrs["langfuse.trace.metadata.graph_id"] == "matter_agent"
+        assert attrs["metadata.run_id"] == "run-abc"
+        assert attrs["aegra.run.id"] == "run-abc"
         # first-class attrs still present
         assert attrs["langfuse.user.id"] == "u1"
 
@@ -73,7 +82,7 @@ class TestSetTraceContext:
         set_trace_context(trace_name="g", metadata={})
 
         attrs = _trace_attrs.get()
-        assert attrs == {"langfuse.trace.name": "g"}
+        assert attrs == {"langfuse.trace.name": "g", "aegra.graph.id": "g"}
 
     def test_metadata_supports_non_string_values(self) -> None:
         """metadata values may be int, float, or bool — all valid OTEL attribute types."""
@@ -215,6 +224,23 @@ class TestMakeRunTraceContext:
         assert attrs["langfuse.trace.metadata.run_id"] == "run-1"
         assert attrs["langfuse.trace.metadata.thread_id"] == "thread-1"
         assert attrs["langfuse.trace.metadata.graph_id"] == "my_graph"
+        assert attrs["aegra.run.id"] == "run-1"
+        assert attrs["aegra.thread.id"] == "thread-1"
+        assert attrs["aegra.graph.id"] == "my_graph"
+
+    def test_user_metadata_propagates_but_system_fields_win(self) -> None:
+        ctx = make_run_trace_context(
+            "run-1",
+            "thread-1",
+            "my_graph",
+            "user-1",
+            extra_metadata={"tenant": "onyx", "run_id": "spoofed"},
+        )
+
+        attrs = ctx.run(_trace_attrs.get)
+        assert attrs["metadata.tenant"] == "onyx"
+        assert attrs["aegra.run.id"] == "run-1"
+        assert attrs["metadata.run_id"] == "run-1"
 
     def test_does_not_pollute_caller_context(self) -> None:
         """Calling make_run_trace_context() does not mutate the caller's context."""
@@ -230,3 +256,11 @@ class TestMakeRunTraceContext:
         assert "langfuse.user.id" not in attrs
         assert "user.id" not in attrs
         assert attrs["langfuse.trace.name"] == "my_graph"
+
+
+class TestMergeRunMetadata:
+    def test_system_fields_win_and_non_primitives_are_dropped(self) -> None:
+        assert merge_run_metadata(
+            {"run_id": "spoofed", "tenant": "onyx", "nested": {"no": "otel"}},
+            {"run_id": "run-1"},
+        ) == {"tenant": "onyx", "run_id": "run-1"}

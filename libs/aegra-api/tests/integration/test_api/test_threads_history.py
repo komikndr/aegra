@@ -1,4 +1,5 @@
 import json
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -12,6 +13,16 @@ from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase, override_get_session_dep
 from tests.fixtures.langgraph import FakeAgent, make_snapshot, patch_langgraph_service
 from tests.fixtures.test_helpers import DummyThread
+
+
+@pytest.fixture(autouse=True)
+def _bypass_graph_access():
+    """Keep history integration tests focused on checkpoint behavior."""
+    with (
+        patch("aegra_api.api.threads.ensure_graph_access"),
+        patch("aegra_api.api.threads.thread_is_accessible", return_value=True),
+    ):
+        yield
 
 
 def _thread_row():

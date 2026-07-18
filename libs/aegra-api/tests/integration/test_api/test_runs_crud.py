@@ -2,10 +2,19 @@
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from tests.fixtures.clients import create_test_app, make_client
 from tests.fixtures.database import DummySessionBase
 from tests.fixtures.session_fixtures import BasicSession, override_session_dependency
 from tests.fixtures.test_helpers import DummyRun, DummyThread
+
+
+@pytest.fixture(autouse=True)
+def _bypass_graph_access():
+    """Keep run integration tests focused on endpoint behavior."""
+    with patch("aegra_api.services.run_preparation.ensure_graph_access"):
+        yield
 
 
 def _thread_row(thread_id="test-thread-123", status="idle", metadata=None, user_id="test-user"):
@@ -456,7 +465,8 @@ class TestStreamRun:
         override_session_dependency(app, BasicSession)
         client = make_client(app)
 
-        resp = client.get("/threads/test-thread-123/runs/nonexistent/stream")
+        with patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())):
+            resp = client.get("/threads/test-thread-123/runs/nonexistent/stream")
 
         assert resp.status_code == 404
 
@@ -683,7 +693,13 @@ class TestWaitForRun:
         override_session_dependency(app, Session)
         client = make_client(app)
 
-        with patch("aegra_api.api.runs._get_session_maker", return_value=_make_session_maker(Session())):
+        session_maker = _make_session_maker(Session())
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=session_maker),
+            patch("aegra_api.services.run_preparation._get_session_maker", return_value=session_maker),
+            patch("aegra_api.services.run_preparation._RESUME_SETTLE_ATTEMPTS", 1),
+            patch("aegra_api.services.run_preparation._RESUME_SETTLE_INTERVAL_SECONDS", 0),
+        ):
             resp = client.post(
                 "/threads/test-thread-123/runs/wait",
                 json={

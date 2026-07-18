@@ -31,6 +31,12 @@ def create_get_graph_mock(return_value=None, side_effect=None):
 class TestGetThreadStateAtCheckpoint:
     """Exercise edge cases and success path for get_thread_state_at_checkpoint."""
 
+    @pytest.fixture(autouse=True)
+    def _bypass_graph_access(self):
+        """Keep checkpoint tests focused on state behavior, not graph policy."""
+        with patch("aegra_api.api.threads.ensure_graph_access"):
+            yield
+
     @pytest.mark.asyncio
     async def test_success_with_subgraphs_passed_to_service(self):
         """Verify subgraphs parameter is passed to convert_snapshot_to_thread_state."""

@@ -17,9 +17,17 @@ from alembic import context
 # access to the values within the .ini file in use.
 config = context.config
 
-# Override the URL from settings — this respects DATABASE_URL, individual
-# POSTGRES_* vars, and preserves query params (e.g. ?sslmode=require).
-config.set_main_option("sqlalchemy.url", settings.db.database_url.replace("%", "%%"))
+# Keep the URL out of configparser interpolation so encoded passwords remain valid.
+config.attributes.setdefault("sqlalchemy.url", settings.db.database_url)
+
+
+def _get_database_url() -> str:
+    """Read the runtime URL, falling back to the Alembic configuration."""
+    url = config.attributes.get("sqlalchemy.url")
+    if isinstance(url, str):
+        return url
+    return config.get_main_option("sqlalchemy.url")
+
 
 # Interpret the config file for Python logging.
 # Only reconfigure logging when running from CLI (main thread).
@@ -52,7 +60,7 @@ def run_migrations_offline() -> None:
 
     """
     context.configure(
-        url=config.get_main_option("sqlalchemy.url"),
+        url=_get_database_url(),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -75,8 +83,8 @@ async def run_async_migrations() -> None:
     and associate a connection with the context.
 
     """
-    configuration = config.get_section(config.config_ini_section)
-    configuration["sqlalchemy.url"] = config.get_main_option("sqlalchemy.url")
+    configuration = config.get_section(config.config_ini_section) or {}
+    configuration["sqlalchemy.url"] = _get_database_url()
 
     connectable = async_engine_from_config(
         configuration,

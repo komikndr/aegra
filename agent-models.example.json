@@ -28,5 +28,13 @@
       "base_url": "http://ray-serve:8000/v1",
       "context_window": 131072
     }
+  },
+  "pipeline_models": {
+    "default": {
+      "label": "Default",
+      "model": "openai/Qwen3.6-35B",
+      "base_url": "${OPENAI_BASE_URL}",
+      "api_key_env": "OPENAI_API_KEY"
+    }
   }
 }

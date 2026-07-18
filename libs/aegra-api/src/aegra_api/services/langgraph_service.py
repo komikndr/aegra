@@ -24,6 +24,7 @@ from langgraph.pregel import Pregel
 from langgraph_sdk.auth.types import BaseUser
 
 from aegra_api.constants import ASSISTANT_NAMESPACE_UUID
+from aegra_api.core.agent_access import configure_graph_access
 from aegra_api.models.auth import User
 from aegra_api.observability.base import (
     get_tracing_callbacks,
@@ -39,6 +40,7 @@ from aegra_api.services.graph_factory import (
     invoke_factory,
     is_factory,
 )
+from aegra_api.utils.run_utils import strip_pinned_config_keys
 
 State = TypeVar("State")
 logger = structlog.get_logger(__name__)
@@ -127,6 +129,10 @@ class LangGraphService:
         if self.config is None:
             raise ValueError("Configuration not loaded")
         graphs_config = self.config.get("graphs", {})
+        graph_access = self.config.get("graph_access")
+        if not isinstance(graph_access, dict):
+            raise ValueError("Configuration must define a graph_access mapping for every registered graph")
+        configure_graph_access(graphs_config, graph_access)
 
         # Detect graph_ids that collide after sanitisation (e.g. "a.b" and
         # "a_b" both map to aegra_graphs.a_b in sys.modules).
@@ -672,22 +678,22 @@ def inject_user_context(user: Any | None, base_config: dict[str, Any] | None = N
         Configuration dict with user context injected
     """
     config: dict[str, Any] = (base_config or {}).copy()
-    config["configurable"] = config.get("configurable", {})
+    configurable = config.get("configurable")
+    config["configurable"] = configurable.copy() if isinstance(configurable, dict) else {}
 
     # All user-related data injection (only if user exists)
     if user:
         # Basic user identity for multi-tenant scoping
-        config["configurable"].setdefault("user_id", user.identity)
-        config["configurable"].setdefault("user_display_name", getattr(user, "display_name", None) or user.identity)
+        config["configurable"]["user_id"] = user.identity
+        config["configurable"]["user_display_name"] = getattr(user, "display_name", None) or user.identity
 
         # Full auth payload for graph nodes - includes ALL fields from auth handler
-        if "langgraph_auth_user" not in config["configurable"]:
-            try:
-                # user.to_dict() returns all fields including extras from auth handlers
-                config["configurable"]["langgraph_auth_user"] = user.to_dict()
-            except Exception:
-                # Fallback: minimal dict if to_dict unavailable or fails
-                config["configurable"]["langgraph_auth_user"] = {"identity": user.identity}
+        try:
+            # user.to_dict() returns all fields including extras from auth handlers
+            config["configurable"]["langgraph_auth_user"] = user.to_dict()
+        except Exception:
+            # Fallback: minimal dict if to_dict unavailable or fails
+            config["configurable"]["langgraph_auth_user"] = {"identity": user.identity}
 
     return config
 
@@ -696,10 +702,12 @@ def create_thread_config(
     thread_id: str, user: User | BaseUser | None, *, additional_config: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Create LangGraph configuration for a specific thread with user context"""
-    base_config = {"configurable": {"thread_id": thread_id}}
+    from copy import deepcopy
 
-    if additional_config:
-        base_config.update(additional_config)
+    base_config = deepcopy(additional_config) if additional_config else {}
+    configurable = base_config.get("configurable")
+    base_config["configurable"] = configurable if isinstance(configurable, dict) else {}
+    base_config["configurable"]["thread_id"] = thread_id
 
     return inject_user_context(user, base_config)
 
@@ -714,23 +722,20 @@ def create_run_config(
 ) -> dict[str, Any]:
     """Create LangGraph configuration for a specific run with full context.
 
-    The function is *additive*: it never removes or renames anything the client
-    supplied.  We simply ensure a `configurable` dict exists and then merge a
-    few server-side keys so graph nodes can rely on them.
+    Client keys remain additive except for server-authoritative identity keys.
     """
     from copy import deepcopy
 
     cfg: dict = deepcopy(additional_config) if additional_config else {}
 
-    # Ensure a configurable section exists
-    cfg.setdefault("configurable", {})
+    configurable = cfg.get("configurable")
+    cfg["configurable"] = configurable if isinstance(configurable, dict) else {}
 
-    # Merge server-provided fields (do NOT overwrite if client already set)
-    cfg["configurable"].setdefault("thread_id", thread_id)
-    cfg["configurable"].setdefault("run_id", run_id)
+    cfg["configurable"]["thread_id"] = thread_id
+    cfg["configurable"]["run_id"] = run_id
 
     # Ensure the root run ID is set to match so that astream_events recognizes it
-    cfg.setdefault("run_id", run_id)
+    cfg["run_id"] = run_id
 
     # Add observability callbacks from various potential sources
     tracing_callbacks = get_tracing_callbacks()
@@ -751,7 +756,8 @@ def create_run_config(
 
     # Apply checkpoint parameters if provided
     if checkpoint and isinstance(checkpoint, dict):
-        cfg["configurable"].update({k: v for k, v in checkpoint.items() if v is not None})
+        safe_checkpoint = strip_pinned_config_keys(checkpoint)
+        cfg["configurable"].update({k: v for k, v in safe_checkpoint.items() if v is not None})
 
     # Finally inject user context via existing helper
     return inject_user_context(user, cfg)

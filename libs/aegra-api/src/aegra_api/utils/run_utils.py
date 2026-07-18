@@ -6,6 +6,21 @@ from langgraph.types import Command, Send
 
 logger = structlog.getLogger(__name__)
 
+SERVER_PINNED_CONFIG_KEYS: frozenset[str] = frozenset(
+    {
+        "thread_id",
+        "run_id",
+        "user_id",
+        "user_display_name",
+        "langgraph_auth_user",
+    }
+)
+
+
+def strip_pinned_config_keys(client_config: dict[str, Any]) -> dict[str, Any]:
+    """Drop server-authoritative identity keys from client configuration."""
+    return {key: value for key, value in client_config.items() if key not in SERVER_PINNED_CONFIG_KEYS}
+
 
 def map_command_to_langgraph(cmd: dict[str, Any]) -> Command:
     """Convert an API command dict to a LangGraph Command object."""

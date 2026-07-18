@@ -11,7 +11,7 @@ Out of the box, Aegra supports:
 
 - **Langfuse** — Production-grade LLM observability
 - **Arize Phoenix** — Local debugging and evaluation
-- **Generic OTLP** — Any compatible backend (Jaeger, Honeycomb, Datadog, etc.)
+- **Generic OTLP** — Any compatible backend (MLflow, Jaeger, Honeycomb, Datadog, etc.)
 
 You can enable one, multiple, or all of these at the same time.
 
@@ -61,7 +61,7 @@ OTEL_CONSOLE_EXPORT=true
     ```
   </Tab>
   <Tab title="Generic OTLP">
-    Connect to Jaeger, Honeycomb, or any OTLP collector.
+    Connect to MLflow, Jaeger, Honeycomb, or any OTLP collector.
 
     ```bash
     OTEL_TARGETS="GENERIC"
@@ -85,6 +85,31 @@ PHOENIX_COLLECTOR_ENDPOINT=http://127.0.0.1:6006/v1/traces
 ```
 
 Each backend receives the same trace data through separate `BatchSpanProcessor` instances.
+
+### Run metadata
+
+Run requests may include bounded primitive metadata for filtering traces across local and Redis worker execution:
+
+```json
+{
+  "assistant_id": "agent",
+  "input": {"messages": [{"role": "user", "content": "Hello"}]},
+  "metadata": {
+    "tenant": "onyx",
+    "environment": "staging",
+    "experiment": 4
+  }
+}
+```
+
+Metadata accepts at most 32 keys. Keys use letters, numbers, `_`, or `-` and are limited to 64 characters. Values must be strings, integers, floats, or booleans; strings are limited to 512 characters.
+
+Every OTLP exporter receives vendor-neutral attributes:
+
+- `aegra.run.id`, `aegra.thread.id`, `aegra.graph.id`, and `aegra.user.id`
+- `metadata.<key>` for request metadata
+
+Runtime identity fields are server-owned and cannot be overridden through request metadata. Existing Langfuse and OpenInference compatibility attributes are emitted alongside the vendor-neutral fields. MLflow consumes these attributes through its OTLP endpoint; no MLflow-specific SDK integration is required.
 
 ## How it works
 

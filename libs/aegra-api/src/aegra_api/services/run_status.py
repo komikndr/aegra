@@ -52,20 +52,26 @@ async def update_run_status(
         await session.commit()
 
 
-async def set_thread_status(session: AsyncSession, thread_id: str, status: str) -> None:
+async def set_thread_status(
+    session: AsyncSession,
+    thread_id: str,
+    status: str,
+    *,
+    user_id: str | None = None,
+) -> None:
     """Update a thread's status column.
 
     Does NOT commit — the caller controls the transaction boundary.
     This allows thread status and run updates to share a single commit.
     """
     validated = validate_thread_status(status)
+    filters = [ThreadORM.thread_id == thread_id]
+    if user_id is not None:
+        filters.append(ThreadORM.user_id == user_id)
+
     result = cast(
         CursorResult,
-        await session.execute(
-            update(ThreadORM)
-            .where(ThreadORM.thread_id == thread_id)
-            .values(status=validated, updated_at=datetime.now(UTC))
-        ),
+        await session.execute(update(ThreadORM).where(*filters).values(status=validated, updated_at=datetime.now(UTC))),
     )
     if result.rowcount == 0:
         raise ValueError(f"Thread '{thread_id}' not found")

@@ -112,7 +112,7 @@ def serialize_documents(documents: list[Document]) -> list[dict[str, Any]]:
     ]
 
 
-async def kms_vector_search(query: str, k: int | None = None) -> dict[str, Any]:
+def kms_vector_search(query: str, k: int | None = None) -> dict[str, Any]:
     """Run vector similarity search against the configured KMS OpenSearch index."""
     runtime = get_runtime(Context)
     vector_store = _vector_store_from_runtime()

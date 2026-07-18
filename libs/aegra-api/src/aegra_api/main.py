@@ -13,6 +13,7 @@ from fastapi.routing import APIRoute, APIRouter
 
 from aegra_api import __version__
 from aegra_api.api.assistants import router as assistants_router
+from aegra_api.api.event_streaming import router as event_streaming_router
 from aegra_api.api.runs import router as runs_router
 from aegra_api.api.stateless_runs import router as stateless_runs_router
 from aegra_api.api.store import router as store_router
@@ -20,6 +21,7 @@ from aegra_api.api.threads import router as threads_router
 from aegra_api.config import CorsConfig, HttpConfig, get_config_dir, load_http_config
 from aegra_api.core.app_loader import load_custom_app
 from aegra_api.core.auth_deps import auth_dependency
+from aegra_api.core.auth_middleware import get_auth_backend
 from aegra_api.core.database import db_manager
 from aegra_api.core.health import router as health_router
 from aegra_api.core.migrations import run_migrations_async
@@ -45,8 +47,27 @@ OPENAPI_TAGS: list[dict[str, Any]] = [
     {"name": "Thread Runs", "description": "Invoke a graph on a thread, updating its persistent state."},
     {"name": "Stateless Runs", "description": "Invoke a graph without state or memory persistence."},
     {"name": "Store", "description": "Persistent key-value and semantic storage available from any thread."},
+    {"name": "Event Streaming", "description": "Agent Protocol v2 thread event streaming and commands."},
     {"name": "Health", "description": "Server health checks and service information."},
 ]
+
+CUSTOM_OPENAPI_TAGS: list[dict[str, Any]] = [
+    {"name": "Onyx DBChat", "description": "Onyx database exploration and query endpoints."},
+    {"name": "Onyx Pipeline", "description": "Onyx pipeline workflow and execution endpoints."},
+    {"name": "Onyx Articles", "description": "SuperAdmin-managed article retrieval endpoints."},
+    {"name": "Onyx Artifacts", "description": "Onyx executive artifact persistence endpoints."},
+    {"name": "Onyx Media", "description": "Onyx bounded image-analysis endpoints."},
+    {"name": "Onyx Custom", "description": "Additional Onyx deployment-specific endpoints."},
+]
+
+_CUSTOM_ROUTE_TAGS = (
+    ("/custom/articles", "Onyx Articles"),
+    ("/custom/executive-artifacts", "Onyx Artifacts"),
+    ("/custom/analyze-images", "Onyx Media"),
+    ("/dbchat", "Onyx DBChat"),
+    ("/pipeline", "Onyx Pipeline"),
+    ("/custom", "Onyx Custom"),
+)
 
 setup_logging()
 logger = structlog.getLogger(__name__)
@@ -74,12 +95,17 @@ def _log_connection_help(error: Exception) -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     """FastAPI lifespan context manager for startup/shutdown"""
-    # Auto-apply pending database migrations before anything else
-    try:
-        await run_migrations_async()
-    except (ConnectionRefusedError, OSError) as e:
-        _log_connection_help(e)
-        raise
+    # Validate authentication before opening any listeners or service connections.
+    get_auth_backend()
+
+    if settings.app.RUN_MIGRATIONS_ON_STARTUP:
+        try:
+            await run_migrations_async()
+        except (ConnectionRefusedError, OSError) as e:
+            _log_connection_help(e)
+            raise
+    else:
+        logger.info("Skipping startup migrations (RUN_MIGRATIONS_ON_STARTUP=false)")
 
     # Startup: Initialize database and LangGraph components
     try:
@@ -155,12 +181,13 @@ async def agent_protocol_exception_handler(_request: Request, exc: HTTPException
 
 async def general_exception_handler(_request: Request, exc: Exception) -> JSONResponse:
     """Handle unexpected exceptions"""
+    logger.exception("Unhandled request exception", exc_info=exc)
     return JSONResponse(
         status_code=500,
         content=AgentProtocolError(
             error="internal_error",
             message="An unexpected error occurred",
-            details={"exception": str(exc)},
+            details=None,
         ).model_dump(),
     )
 
@@ -214,6 +241,17 @@ def _apply_auth_to_routes(app: FastAPI, auth_deps: list[Any]) -> None:
 
     process_routes(app.routes)
     logger.info("Applied authentication dependency to custom routes")
+
+
+def _apply_custom_route_tags(app: FastAPI) -> None:
+    """Tag deployment-specific routes before core routers are merged."""
+    for route in app.routes:
+        if not isinstance(route, APIRoute) or route.tags:
+            continue
+        for prefix, tag in _CUSTOM_ROUTE_TAGS:
+            if route.path.startswith(prefix):
+                route.tags = [tag]
+                break
 
 
 def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
@@ -293,6 +331,7 @@ def _include_core_routers(app: FastAPI) -> None:
     app.include_router(runs_router)
     app.include_router(stateless_runs_router)
     app.include_router(store_router)
+    app.include_router(event_streaming_router)
 
 
 def create_app() -> FastAPI:
@@ -322,8 +361,8 @@ def create_app() -> FastAPI:
             )
 
         application = user_app
-        if not application.openapi_tags:
-            application.openapi_tags = OPENAPI_TAGS
+        _apply_custom_route_tags(application)
+        application.openapi_tags = [*OPENAPI_TAGS, *CUSTOM_OPENAPI_TAGS]
         _include_core_routers(application)
 
         # Add root endpoint if not already defined

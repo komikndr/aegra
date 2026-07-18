@@ -28,6 +28,7 @@ class TestLangGraphServiceRealFiles:
         """Test initialization with real config file"""
         config_data = {
             "graphs": {"test_graph": "./graphs/test.py:graph"},
+            "graph_access": {"test_graph": []},
             "dependencies": ["dep1", "dep2"],
         }
 
@@ -49,7 +50,10 @@ class TestLangGraphServiceRealFiles:
     @pytest.mark.asyncio
     async def test_initialize_env_var_with_real_file(self, monkeypatch):
         """Test initialization with AEGRA_CONFIG pointing to real file"""
-        config_data = {"graphs": {"env_graph": "./graphs/env.py:graph"}}
+        config_data = {
+            "graphs": {"env_graph": "./graphs/env.py:graph"},
+            "graph_access": {"env_graph": []},
+        }
 
         with TemporaryDirectory() as temp_dir:
             config_path = Path(temp_dir) / "env_config.json"
@@ -73,7 +77,10 @@ class TestLangGraphServiceRealFiles:
         """Test fallback to langgraph.json when aegra.json not found"""
         import sys
 
-        config_data = {"graphs": {"fallback_graph": "./graphs/fallback.py:graph"}}
+        config_data = {
+            "graphs": {"fallback_graph": "./graphs/fallback.py:graph"},
+            "graph_access": {"fallback_graph": []},
+        }
 
         # Windows has issues with temp directory cleanup when files are still open
         # Use manual cleanup with error handling to work around this

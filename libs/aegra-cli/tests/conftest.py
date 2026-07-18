@@ -14,6 +14,13 @@ if TYPE_CHECKING:
     from collections.abc import Generator
 
 
+@pytest.fixture(autouse=True)
+def isolate_server_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Prevent .env-loading tests from leaking server options into later tests."""
+    for key in ("AEGRA_CONFIG", "HOST", "PORT"):
+        monkeypatch.delenv(key, raising=False)
+
+
 @pytest.fixture
 def cli_runner() -> CliRunner:
     """Create a Click CLI test runner.

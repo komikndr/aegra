@@ -14,6 +14,16 @@ from tests.fixtures.session_fixtures import BasicSession, override_session_depen
 from tests.fixtures.test_helpers import DummyRun, DummyThread
 
 
+@pytest.fixture(autouse=True)
+def _bypass_graph_access():
+    """Keep CRUD integration tests focused on API behavior, not graph policy."""
+    with (
+        patch("aegra_api.api.threads.ensure_graph_access"),
+        patch("aegra_api.api.threads.thread_is_accessible", return_value=True),
+    ):
+        yield
+
+
 def create_get_graph_mock(return_value=None, side_effect=None):
     """Create a mock for langgraph_service.get_graph that works as an async context manager."""
     mock = MagicMock()
@@ -658,6 +668,43 @@ class TestThreadUpdateState:
             mock_agent.aupdate_state.assert_called_once()
             call_args = mock_agent.aupdate_state.call_args
             assert call_args[0][1] == {"foo": "bar"}  # values
+
+    @pytest.mark.parametrize(
+        ("payload", "expected_checkpoint"),
+        [
+            ({"values": None, "as_node": "__copy__", "checkpoint_id": "cp-node"}, "cp-node"),
+            ({"values": None, "checkpoint_id": "cp-id"}, "cp-id"),
+            ({"values": None, "checkpoint": {"checkpoint_id": "cp-body"}}, "cp-body"),
+        ],
+    )
+    def test_checkpoint_target_with_null_values_creates_checkpoint(
+        self,
+        payload: dict[str, object],
+        expected_checkpoint: str,
+    ) -> None:
+        """Checkpoint targeting must not fall through to the GET-state shim."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        thread = _thread_row("test-123", metadata={"graph_id": "test-graph"})
+
+        class Session(DummySessionBase):
+            async def scalar(self, _stmt):
+                return thread
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+        mock_agent = AsyncMock()
+        mock_agent.aupdate_state.return_value = {"configurable": {"checkpoint_id": "new-cp", "checkpoint_ns": ""}}
+        mock_agent.with_config = Mock(return_value=mock_agent)
+
+        with patch("aegra_api.services.langgraph_service.get_langgraph_service") as mock_get_service:
+            mock_get_service.return_value.get_graph = create_get_graph_mock(return_value=mock_agent)
+
+            response = client.post("/threads/test-123/state", json=payload)
+
+        assert response.status_code == 200
+        config = mock_agent.aupdate_state.call_args.args[0]
+        assert config["configurable"]["checkpoint_id"] == expected_checkpoint
+        assert mock_agent.aupdate_state.call_args.args[1] is None
 
     def test_update_state_no_graph(self):
         """Test updating state when thread has no graph."""

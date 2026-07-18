@@ -75,6 +75,16 @@ class TestAppSettingsServerURL:
         assert app.PORT == 2026
 
 
+class TestSsePingInterval:
+    def test_uses_integer_keepalive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("KEEPALIVE_INTERVAL_SECS", "10.9")
+        assert AppSettings(_env_file=None).sse_ping_interval_secs == 10
+
+    def test_clamps_subsecond_keepalive(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("KEEPALIVE_INTERVAL_SECS", "0.5")
+        assert AppSettings(_env_file=None).sse_ping_interval_secs == 1
+
+
 class TestDatabaseURLSupport:
     """Test that DATABASE_URL is used directly for computed URLs."""
 

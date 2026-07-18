@@ -8,6 +8,7 @@ NOTE: Environment variables must be set before importing the app, so the
 imports below are intentionally placed after os.environ calls.
 """
 
+import argparse
 import json
 import logging
 import os
@@ -21,6 +22,13 @@ os.environ.setdefault("AEGRA__APP__PROJECT_NAME", "Aegra")
 os.environ.setdefault("AEGRA__APP__VERSION", version("aegra-api"))
 os.environ.setdefault("AEGRA__APP__DEBUG", "false")
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://export:export@localhost:5432/export")
+os.environ["AEGRA_CONFIG"] = ""
+os.environ["AUTH_TYPE"] = "noop"
+os.environ["ENV_MODE"] = "LOCAL"
+# Config discovery falls back to ./aegra.json. Run from this script directory,
+# which intentionally has no deployment config, so custom routes and schemas do
+# not leak into the standard Agent Protocol document.
+os.chdir(Path(__file__).resolve().parent)
 
 import structlog  # noqa: E402
 
@@ -32,8 +40,8 @@ from aegra_api.main import OPENAPI_TAGS, app  # noqa: E402
 from aegra_api.settings import settings  # noqa: E402
 
 
-def main() -> None:
-    """Export the OpenAPI spec to docs/openapi.json."""
+def _render_schema() -> str:
+    """Generate the deterministic standard Agent Protocol schema."""
     schema = app.openapi()
 
     # Normalize title and description to standard Aegra values
@@ -57,9 +65,26 @@ def main() -> None:
     # Keep only core tags
     schema["tags"] = [t for t in schema.get("tags", []) if t["name"] in core_tags]
 
+    return json.dumps(schema, indent=2) + "\n"
+
+
+def main() -> None:
+    """Export or verify the standard Agent Protocol OpenAPI spec."""
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--check", action="store_true", help="Fail when docs/openapi.json is stale")
+    args = parser.parse_args()
+
     output_path = Path(__file__).parent.parent / "docs" / "openapi.json"
-    output_path.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
-    print(f"Exported {len(schema['paths'])} endpoints to {output_path}")
+    rendered = _render_schema()
+    if args.check:
+        current = output_path.read_text(encoding="utf-8") if output_path.exists() else ""
+        if current != rendered:
+            raise SystemExit("docs/openapi.json is stale; run scripts/export_openapi.py")
+        print(f"OpenAPI schema is current: {output_path}")
+        return
+
+    output_path.write_text(rendered, encoding="utf-8")
+    print(f"Exported standard Agent Protocol schema to {output_path}")
 
 
 if __name__ == "__main__":

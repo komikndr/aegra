@@ -25,6 +25,31 @@
         "analytic_artifact_editor": "./graphs/analytic_agent/graph.py:artifact_editor_graph",
         "analytic_dbchat": "./graphs/dbchat_agent/graph.py:graph"
     },
+    "graph_access": {
+        "agent": ["SuperAdmin"],
+        "agent_hitl": ["SuperAdmin"],
+        "subgraph_agent": ["SuperAdmin"],
+        "subgraph_hitl_agent": ["SuperAdmin"],
+        "factory": ["SuperAdmin"],
+        "stress_test": ["SuperAdmin"],
+        "stress_tool_agent": ["SuperAdmin"],
+        "normal_agent": ["SuperAdmin"],
+        "analytics": ["SuperAdmin"],
+        "casual_chat": [],
+        "casual_executive": [],
+        "casual_office": [],
+        "casual_artifact_editor": [],
+        "kms_chat": ["Staff"],
+        "qa_chat": [],
+        "kms_executive": ["Staff"],
+        "kms_office": ["Staff"],
+        "kms_artifact_editor": ["Staff"],
+        "analytic_chat": ["Executive", "Senior Data Engineer"],
+        "analytic_executive": ["Executive", "Senior Data Engineer"],
+        "analytic_office": ["Executive", "Senior Data Engineer"],
+        "analytic_artifact_editor": ["Executive", "Senior Data Engineer"],
+        "analytic_dbchat": ["Executive", "Senior Data Engineer"]
+    },
     "http": {"app": "./custom_routes_example.py:app", "enable_custom_route_auth": true},
     "auth": {"path": "./keycloak_auth.py:auth"}
 }

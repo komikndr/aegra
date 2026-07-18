@@ -2,66 +2,50 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from functools import lru_cache
-from typing import Any, cast
+from typing import Any
 from urllib.parse import quote_plus
 
 from langgraph.runtime import get_runtime
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, inspect
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 
+from aegra_api.security.sql_readonly import UnsafeSqlError, execute_read_only_sql, validate_read_only_sql
 from analytic_agent.context import Context
-
-READ_ONLY_PREFIXES = ("select", "with", "pragma", "explain")
-FORBIDDEN_SQL_KEYWORDS = (
-    "insert",
-    "update",
-    "delete",
-    "alter",
-    "drop",
-    "create",
-    "truncate",
-    "grant",
-    "revoke",
-    "replace",
-    "merge",
-    "attach",
-    "vacuum",
-)
 
 
 def _build_database_url(context: Context) -> str | None:
-    if context.analytic_db_url:
-        return context.analytic_db_url
+    database_url = os.environ.get("ANALYTIC_DB_URL", "").strip()
+    if database_url:
+        return database_url
 
-    dialect = context.analytic_db_dialect.strip().lower()
+    dialect = os.environ.get("ANALYTIC_DB_DIALECT", "sqlite").strip().lower()
+    db_name = os.environ.get("ANALYTIC_DB_NAME", "").strip()
     if dialect == "sqlite":
-        if not context.analytic_db_name:
+        if not db_name:
             return None
-        db_name = context.analytic_db_name
         if db_name == ":memory:":
             return "sqlite:///:memory:"
         if db_name.startswith("/"):
             return f"sqlite:///{db_name}"
         return f"sqlite:///./{db_name}"
 
-    if not all(
-        [
-            context.analytic_db_host,
-            context.analytic_db_name,
-            context.analytic_db_user,
-            context.analytic_db_password,
-        ]
-    ):
+    host = os.environ.get("ANALYTIC_DB_HOST", "").strip()
+    user = os.environ.get("ANALYTIC_DB_USER", "").strip()
+    password = os.environ.get("ANALYTIC_DB_PASSWORD", "").strip()
+    if not all([host, db_name, user]):
         return None
 
     driver = "postgresql+psycopg" if dialect in {"postgres", "postgresql"} else dialect
-    port = f":{context.analytic_db_port}" if context.analytic_db_port else ""
-    user = quote_plus(cast("str", context.analytic_db_user or ""))
-    password = quote_plus(cast("str", context.analytic_db_password or ""))
-    return f"{driver}://{user}:{password}@{context.analytic_db_host}{port}/{context.analytic_db_name}"
+    port_value = os.environ.get("ANALYTIC_DB_PORT", "").strip()
+    port = f":{port_value}" if port_value else ""
+    auth = quote_plus(user)
+    if password:
+        auth = f"{auth}:{quote_plus(password)}"
+    return f"{driver}://{auth}@{host}{port}/{db_name}"
 
 
 @lru_cache(maxsize=8)
@@ -82,17 +66,18 @@ def _database_unavailable_message() -> str:
 
 
 def _database_error_message(error: Exception) -> str:
-    return f"Analytic database is unavailable: {error}"
+    return "Analytic database is unavailable."
 
 
-def _is_read_only_query(query: str) -> bool:
-    normalized = query.strip().lower().strip(";")
-    if not normalized.startswith(READ_ONLY_PREFIXES):
+def _is_read_only_query(query: str, dialect: str = "sqlite") -> bool:
+    try:
+        validate_read_only_sql(query, dialect)
+    except UnsafeSqlError:
         return False
-    return not any(f" {keyword} " in f" {normalized} " for keyword in FORBIDDEN_SQL_KEYWORDS)
+    return True
 
 
-async def analytic_list_tables() -> dict[str, Any]:
+def analytic_list_tables() -> dict[str, Any]:
     """List available tables in the configured analytic database."""
     engine = _get_engine_from_runtime()
     if engine is None:
@@ -120,7 +105,7 @@ async def analytic_list_tables() -> dict[str, Any]:
         }
 
 
-async def analytic_describe_table(table_name: str) -> dict[str, Any]:
+def analytic_describe_table(table_name: str) -> dict[str, Any]:
     """Describe a table in the configured analytic database, including column names and types."""
     engine = _get_engine_from_runtime()
     if engine is None:
@@ -158,7 +143,7 @@ async def analytic_describe_table(table_name: str) -> dict[str, Any]:
         }
 
 
-async def analytic_query_sql(query: str) -> dict[str, Any]:
+def analytic_query_sql(query: str) -> dict[str, Any]:
     """Run a read-only SQL query against the configured analytic database."""
     engine = _get_engine_from_runtime()
     if engine is None:
@@ -168,7 +153,7 @@ async def analytic_query_sql(query: str) -> dict[str, Any]:
             "rows": [],
         }
 
-    if not _is_read_only_query(query):
+    if not _is_read_only_query(query, engine.dialect.name):
         return {
             "available": True,
             "executed": False,
@@ -176,17 +161,15 @@ async def analytic_query_sql(query: str) -> dict[str, Any]:
         }
 
     try:
-        with engine.connect() as connection:
-            result = connection.execute(text(query))
-            rows = result.mappings().fetchmany(200)
-            return {
-                "available": True,
-                "executed": True,
-                "row_count": len(rows),
-                "columns": list(result.keys()),
-                "rows": [dict(row) for row in rows],
-            }
-    except SQLAlchemyError as error:
+        columns, rows = execute_read_only_sql(engine, query, max_rows=200)
+        return {
+            "available": True,
+            "executed": True,
+            "row_count": len(rows),
+            "columns": columns,
+            "rows": rows,
+        }
+    except (SQLAlchemyError, UnsafeSqlError) as error:
         return {
             "available": False,
             "executed": False,

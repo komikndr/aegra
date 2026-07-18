@@ -4,6 +4,7 @@ Contains the shared run-creation helper, thread metadata updates,
 resume-command validation, and config/context merging logic.
 """
 
+import asyncio
 import os
 import sys
 from datetime import UTC, datetime
@@ -15,13 +16,14 @@ from uuid import uuid4
 import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.agent_access import ensure_graph_access
 from aegra_api.core.orm import Assistant as AssistantORM
 from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
+from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
 from aegra_api.services.executor import executor
@@ -31,6 +33,9 @@ from aegra_api.utils.assistants import resolve_assistant_id
 from aegra_api.utils.run_utils import _merge_jsonb
 
 logger = structlog.getLogger(__name__)
+
+_RESUME_SETTLE_ATTEMPTS = 10
+_RESUME_SETTLE_INTERVAL_SECONDS = 0.1
 
 
 def _ensure_graphs_import_path() -> None:
@@ -98,16 +103,32 @@ def _preflight_model_endpoint(agent_id: str, context_model: str | None = None) -
     raise HTTPException(status_code=503, detail="Model endpoint is unavailable. Your message was not sent.")
 
 
-async def _validate_resume_command(session: AsyncSession, thread_id: str, command: dict[str, Any] | None) -> None:
-    """Validate resume command requirements."""
-    if command and command.get("resume") is not None:
-        # Check if thread exists and is in interrupted state
-        thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id)
-        thread = await session.scalar(thread_stmt)
-        if not thread:
-            raise HTTPException(404, f"Thread '{thread_id}' not found")
-        if thread.status != "interrupted":
-            raise HTTPException(400, "Cannot resume: thread is not in interrupted state")
+async def _validate_resume_command(
+    session: AsyncSession,
+    thread_id: str,
+    user_id: str,
+    command: dict[str, Any] | None,
+) -> None:
+    """Validate resume commands, tolerating the interrupt-finalization race."""
+    if not command or "resume" not in command:
+        return
+
+    thread_stmt = select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user_id)
+    thread = await session.scalar(thread_stmt)
+    if not thread:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+    if thread.status == "interrupted":
+        return
+
+    maker = _get_session_maker()
+    for _ in range(_RESUME_SETTLE_ATTEMPTS):
+        await asyncio.sleep(_RESUME_SETTLE_INTERVAL_SECONDS)
+        async with maker() as fresh:
+            fresh_thread = await fresh.scalar(thread_stmt)
+        if fresh_thread is not None and fresh_thread.status == "interrupted":
+            return
+
+    raise HTTPException(400, "Cannot resume: thread is not in interrupted state")
 
 
 _THREAD_NAME_MAX_LENGTH = 100
@@ -187,7 +208,9 @@ async def update_thread_metadata(
     Does NOT commit — the caller controls the transaction boundary.
     """
     # Read-modify-write to avoid DB-specific JSON concat operators
-    thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+    thread = await session.scalar(
+        select(ThreadORM).where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user_id)
+    )
 
     thread_name = _extract_thread_name(input_data or {})
 
@@ -223,7 +246,9 @@ async def update_thread_metadata(
     if thread_name and not md.get("thread_name"):
         md["thread_name"] = thread_name
     await session.execute(
-        update(ThreadORM).where(ThreadORM.thread_id == thread_id).values(metadata_json=md, updated_at=datetime.now(UTC))
+        update(ThreadORM)
+        .where(ThreadORM.thread_id == thread_id, ThreadORM.user_id == user_id)
+        .values(metadata_json=md, updated_at=datetime.now(UTC))
     )
 
 
@@ -234,6 +259,7 @@ async def _prepare_run(
     user: User,
     *,
     initial_status: str,
+    event_streaming_v2: bool = False,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
@@ -241,7 +267,11 @@ async def _prepare_run(
     builds a RunJob, submits it to the executor, and returns the triple
     ``(run_id, run_model, job)``.
     """
-    await _validate_resume_command(session, thread_id, request.command)
+    existing_thread = await session.scalar(select(ThreadORM).where(ThreadORM.thread_id == thread_id))
+    if existing_thread and existing_thread.user_id != user.identity:
+        raise HTTPException(404, f"Thread '{thread_id}' not found")
+
+    await _validate_resume_command(session, thread_id, user.identity, request.command)
 
     run_id = str(uuid4())
     langgraph_service = get_langgraph_service()
@@ -270,6 +300,7 @@ async def _prepare_run(
 
     assistant_stmt = select(AssistantORM).where(
         AssistantORM.assistant_id == resolved_assistant_id,
+        or_(AssistantORM.user_id == user.identity, AssistantORM.user_id == "system"),
     )
     assistant = await session.scalar(assistant_stmt)
     if not assistant:
@@ -292,19 +323,20 @@ async def _prepare_run(
     await update_thread_metadata(
         session, thread_id, assistant.assistant_id, assistant.graph_id, user_id=user.identity, input_data=request.input
     )
-    await set_thread_status(session, thread_id, "busy")
+    await set_thread_status(session, thread_id, "busy", user_id=user.identity)
 
     # Build the RunJob before persisting so we can store execution_params
     job = RunJob(
         identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id),
         user=user,
         execution=RunExecution(
-            input_data=request.input or {},
+            input_data=request.input,
             config=config,
             context=context,
             stream_mode=request.stream_mode,
             checkpoint=request.checkpoint,
             command=request.command,
+            event_streaming_v2=event_streaming_v2,
         ),
         behavior=RunBehavior(
             interrupt_before=request.interrupt_before,
@@ -312,6 +344,7 @@ async def _prepare_run(
             multitask_strategy=request.multitask_strategy,
             subgraphs=request.stream_subgraphs or False,
         ),
+        run_metadata=request.metadata or {},
     )
 
     # Persist run record with trace metadata for worker observability.
@@ -331,7 +364,7 @@ async def _prepare_run(
         thread_id=thread_id,
         assistant_id=resolved_assistant_id,
         status=initial_status,
-        input=request.input or {},
+        input=request.input,
         config=config,
         context=context,
         user_id=user.identity,

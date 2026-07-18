@@ -31,10 +31,11 @@ class TestLocalExecutor:
 
         with (
             patch("aegra_api.services.run_executor.execute_run", mock_execute),
-            patch("aegra_api.services.local_executor.make_run_trace_context", return_value=None),
+            patch("aegra_api.services.local_executor.make_run_trace_context", return_value=None) as make_trace,
         ):
             job = _make_job()
             await executor.submit(job)
+            make_trace.assert_called_once_with("run-1", "thread-1", "graph-1", "user-1", extra_metadata={})
 
             # Task should be registered in active_runs
             from aegra_api.core.active_runs import active_runs

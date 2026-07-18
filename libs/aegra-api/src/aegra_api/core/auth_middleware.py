@@ -10,7 +10,7 @@ import importlib
 import importlib.util
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from langgraph_sdk import Auth
@@ -54,8 +54,9 @@ class LangGraphUser(BaseUser):
 
     def __getattr__(self, name: str) -> Any:
         """Allow access to any additional fields from auth data"""
-        if name in self._user_data:
-            return self._user_data[name]
+        user_data = cast(dict[str, Any], self._user_data)
+        if name in user_data:
+            return user_data[name]
         raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
     def to_dict(self) -> MinimalUserDict:
@@ -73,6 +74,8 @@ class LangGraphAuthBackend(AuthenticationBackend):
 
     def __init__(self) -> None:
         self.auth_instance = self._load_auth_instance()
+        if self.auth_instance is not None and self.auth_instance._authenticate_handler is None:
+            raise RuntimeError("Configured Auth instance has no authenticate handler")
 
     def _load_auth_instance(self) -> Auth | None:
         """Load the auth instance from config or fallback to hardcoded candidates.
@@ -84,20 +87,23 @@ class LangGraphAuthBackend(AuthenticationBackend):
         Returns:
             Auth instance or None if not found (noop handled in authenticate() method)
         """
-        # 1. Try loading from config
-        try:
-            auth_config = load_auth_config()
-            if auth_config and "path" in auth_config:
-                auth_path = auth_config["path"]
-                logger.info(f"Loading auth from config path: {auth_path}")
-                auth_instance = self._load_from_path(auth_path)
-                if auth_instance:
-                    return auth_instance
-                logger.warning(f"Failed to load auth from config path: {auth_path}")
-        except Exception as e:
-            logger.warning(f"Error loading auth config: {e}")
+        auth_config = load_auth_config()
+        if auth_config is not None:
+            auth_path = auth_config.get("path")
+            if not isinstance(auth_path, str) or not auth_path.strip():
+                raise RuntimeError("Configured auth must define a non-empty path")
+            logger.info(f"Loading auth from config path: {auth_path}")
+            auth_instance = self._load_from_path(auth_path)
+            if auth_instance is None:
+                raise RuntimeError(f"Failed to load configured auth from {auth_path}")
+            return auth_instance
 
-        logger.debug("No auth instance found from config")
+        if settings.app.AUTH_TYPE == "custom":
+            raise RuntimeError("AUTH_TYPE=custom requires an auth.path configuration")
+        if settings.app.ENV_MODE == "PRODUCTION":
+            raise RuntimeError("No-auth mode is disabled in production")
+
+        logger.warning("No auth configured; using explicit development no-auth mode")
         return None
 
     def _load_from_path(self, path: str) -> Auth | None:
@@ -236,8 +242,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
             return credentials, user
 
         if self.auth_instance._authenticate_handler is None:
-            logger.warning("No authenticate handler configured, skipping authentication")
-            return None
+            raise AuthenticationError("Authentication system is not configured")
 
         try:
             # Convert headers to dict format expected by auth handlers
@@ -256,13 +261,14 @@ class LangGraphAuthBackend(AuthenticationBackend):
                 raise AuthenticationError("Auth handler must return 'identity' field")
 
             # Extract permissions for credentials
-            permissions = user_data.get("permissions", [])
+            auth_data = cast(dict[str, Any], user_data)
+            permissions = auth_data.get("permissions", [])
             if isinstance(permissions, str):
                 permissions = [permissions]
 
             # Create Starlette-compatible user and credentials
             credentials = AuthCredentials(permissions)
-            user = LangGraphUser(user_data)
+            user = LangGraphUser(cast(MinimalUserDict, user_data))
 
             logger.debug(f"Successfully authenticated user: {user.identity}")
             return credentials, user
@@ -276,6 +282,7 @@ class LangGraphAuthBackend(AuthenticationBackend):
             raise AuthenticationError("Authentication system error") from e
 
 
+@functools.lru_cache(maxsize=1)
 def get_auth_backend() -> AuthenticationBackend:
     """
     Get authentication backend based on AUTH_TYPE environment variable.
@@ -285,12 +292,10 @@ def get_auth_backend() -> AuthenticationBackend:
     """
     auth_type = settings.app.AUTH_TYPE
 
-    if auth_type in ["noop", "custom"]:
-        logger.debug(f"Using auth backend with type: {auth_type}")
-        return LangGraphAuthBackend()
-    else:
-        logger.warning(f"Unknown AUTH_TYPE: {auth_type}, using noop")
-        return LangGraphAuthBackend()
+    if auth_type not in {"noop", "custom"}:
+        raise RuntimeError(f"Unsupported AUTH_TYPE: {auth_type}")
+    logger.debug(f"Using auth backend with type: {auth_type}")
+    return LangGraphAuthBackend()
 
 
 def on_auth_error(conn: HTTPConnection, exc: AuthenticationError) -> JSONResponse:
@@ -327,5 +332,5 @@ def get_auth_instance() -> Auth | None:
     Returns:
         Auth instance or None if not configured/found
     """
-    backend = LangGraphAuthBackend()
-    return backend.auth_instance
+    backend = get_auth_backend()
+    return backend.auth_instance if isinstance(backend, LangGraphAuthBackend) else None

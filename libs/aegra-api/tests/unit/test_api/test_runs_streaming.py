@@ -54,10 +54,15 @@ class TestRunsStreamingEndpoints:
             input={"message": "stream me"},
             stream_mode=["events"],
         )
+        session_maker = MagicMock()
+        session_maker.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        session_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
         with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=session_maker),
             patch("aegra_api.services.run_preparation._validate_resume_command", new_callable=AsyncMock),
             patch("aegra_api.services.run_preparation.get_langgraph_service") as mock_lg_service,
+            patch("aegra_api.services.run_preparation.ensure_graph_access"),
             patch(
                 "aegra_api.services.run_preparation.resolve_assistant_id",
                 return_value="test-assistant",
@@ -68,11 +73,11 @@ class TestRunsStreamingEndpoints:
             patch("aegra_api.api.runs.asyncio.create_task") as mock_create_task,
             patch("aegra_api.api.runs.active_runs", {}),
             patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec,
+            patch("aegra_api.api.runs.broker_manager.request_cancel", new_callable=AsyncMock) as request_cancel,
         ):
             mock_lg_service.return_value.list_graphs.return_value = ["test-graph"]
 
-            # DB setup
-            mock_session.scalar.return_value = sample_assistant
+            mock_session.scalar.side_effect = [None, sample_assistant]
 
             # Mock generator for streaming response
             async def mock_generator() -> AsyncGenerator:
@@ -80,12 +85,17 @@ class TestRunsStreamingEndpoints:
 
             mock_stream_exec.return_value = mock_generator()
 
-            response = await create_and_stream_run(thread_id, request, mock_user, mock_session)
+            response = await create_and_stream_run(thread_id, request, mock_user)
 
             # Verify Response
             assert response.status_code == 200
             assert response.headers["Content-Type"] == "text/event-stream"
             assert f"/runs/{run_id}" in response.headers["Location"]
+            assert session_maker.return_value.__aexit__.await_count == 1
+
+            assert response.client_close_handler_callable is not None
+            await response.client_close_handler_callable({"type": "http.disconnect"})
+            request_cancel.assert_awaited_once_with(run_id, "cancel")
 
             # Verify streaming service called
             mock_stream_exec.assert_called_once()
@@ -115,8 +125,14 @@ class TestRunsStreamingEndpoints:
         )
 
         mock_session.scalar.return_value = run_orm
+        session_maker = MagicMock()
+        session_maker.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        session_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec:
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=session_maker),
+            patch("aegra_api.api.runs.streaming_service.stream_run_execution") as mock_stream_exec,
+        ):
             # Mock generator
             async def mock_generator() -> AsyncGenerator:
                 yield "data"
@@ -128,7 +144,6 @@ class TestRunsStreamingEndpoints:
                 run_id,
                 last_event_id="evt-1",
                 user=mock_user,
-                session=mock_session,
             )
 
             assert response.status_code == 200
@@ -143,9 +158,15 @@ class TestRunsStreamingEndpoints:
     async def test_stream_run_not_found(self, mock_user: User, mock_session: AsyncMock) -> None:
         """Test streaming non-existent run."""
         mock_session.scalar.return_value = None
+        session_maker = MagicMock()
+        session_maker.return_value.__aenter__ = AsyncMock(return_value=mock_session)
+        session_maker.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        with pytest.raises(HTTPException) as exc:
-            await stream_run("t", "r", user=mock_user, session=mock_session)
+        with (
+            patch("aegra_api.api.runs._get_session_maker", return_value=session_maker),
+            pytest.raises(HTTPException) as exc,
+        ):
+            await stream_run("t", "r", user=mock_user)
 
         assert exc.value.status_code == 404
 
