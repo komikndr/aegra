@@ -1,10 +1,11 @@
 """Graph definitions for the analytic agent."""
 
+import re
 from datetime import datetime
 from typing import Literal, cast
 from zoneinfo import ZoneInfo
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.graph import StateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
@@ -29,6 +30,25 @@ from analytic_agent.context import (
 from analytic_agent.context import Context as BaseContext
 from analytic_agent.tools import TOOLS
 
+_SCHEMA_DISCOVERY_REQUEST = re.compile(
+    r"(?:\b(?:list|show|available|what|which|check|inspect|describe)\b.*\b(?:table|tables|view|views|schema|columns?)\b|"
+    r"\b(?:table|tables|view|views|schema|columns?)\b.*\b(?:list|show|available|what|which|check|inspect|describe|exist)\b)",
+    re.IGNORECASE,
+)
+
+
+def requires_initial_table_listing(state: State) -> bool:
+    """Require table discovery before answering a new schema-discovery request."""
+    latest_human_index = next(
+        (index for index in range(len(state.messages) - 1, -1, -1) if isinstance(state.messages[index], HumanMessage)),
+        None,
+    )
+    if latest_human_index is None:
+        return False
+    if any(isinstance(message, ToolMessage) for message in state.messages[latest_human_index + 1 :]):
+        return False
+    return bool(_SCHEMA_DISCOVERY_REQUEST.search(state.messages[latest_human_index].text))
+
 
 async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, list[AIMessage]]:
     model_config = resolve_agent_model(
@@ -40,7 +60,10 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         min_recent_messages=runtime.context.num_limit_min_recent_messages,
     )
     base_model = load_chat_model(model_config.model, base_url=model_config.base_url, api_key=model_config.api_key)
-    model = bind_tools_with_parallel(base_model, TOOLS)
+    if requires_initial_table_listing(state):
+        model = bind_tools_with_parallel(base_model, [TOOLS[0]], tool_choice="required")
+    else:
+        model = bind_tools_with_parallel(base_model, TOOLS)
     model = apply_reasoning_effort(
         model,
         model_config.model,

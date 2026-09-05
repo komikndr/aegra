@@ -625,6 +625,11 @@ def is_media_not_supported_error(error: Exception) -> bool:
 def bind_tools_with_parallel(
     model: BaseChatModel,
     tools: Sequence[dict[str, Any] | type | Callable[..., Any] | BaseTool],
+    *,
+    tool_choice: str | dict[str, Any] | None = None,
 ) -> Runnable[LanguageModelInput, AIMessage]:
     """Bind tools to a model with explicit parallel_tool_calls=True."""
-    return model.bind_tools(tools, parallel_tool_calls=True)
+    kwargs: dict[str, Any] = {"parallel_tool_calls": True}
+    if tool_choice is not None:
+        kwargs["tool_choice"] = tool_choice
+    return model.bind_tools(tools, **kwargs)

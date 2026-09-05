@@ -13,6 +13,7 @@ CLIENT_ID="${MINIO_OIDC_CLIENT_ID:-minio-console}"
 CLIENT_SECRET="${MINIO_OIDC_CLIENT_SECRET:-minio-console-local-secret}"
 REDIRECT_URI="${MINIO_OIDC_REDIRECT_URI:-http://localhost:9001/oauth_callback}"
 WEB_ORIGIN="${MINIO_OIDC_WEB_ORIGIN:-http://localhost:9001}"
+MESSAGE_GATEWAY_CLIENT_ID="${MESSAGE_GATEWAY_KEYCLOAK_CLIENT_ID:-aegra-message-gateway}"
 
 get_client_uuid() {
   /opt/keycloak/bin/kcadm.sh get clients -r "$REALM" -q clientId="$1" --fields id,clientId \
@@ -36,6 +37,40 @@ update_client_secret() {
 
   /opt/keycloak/bin/kcadm.sh update "clients/$client_uuid" -r "$REALM" \
     -s secret="$client_secret" >/dev/null
+}
+
+ensure_optional_client_scope() {
+  client_uuid="$1"
+  scope_name="$2"
+  scope_uuid="$(
+    /opt/keycloak/bin/kcadm.sh get client-scopes -r "$REALM" -q name="$scope_name" --fields id,name \
+      | sed -n 's/.*"id" : "\([^"]*\)".*/\1/p' \
+      | head -n 1
+  )"
+
+  if [ -z "$scope_uuid" ]; then
+    echo "Client scope '$scope_name' not found in realm '$REALM'" >&2
+    exit 1
+  fi
+
+  assigned="$({
+    /opt/keycloak/bin/kcadm.sh get "clients/$client_uuid/optional-client-scopes" -r "$REALM" --fields name
+  } | sed -n 's/.*"name" : "\([^"]*\)".*/\1/p' | grep -Fx "$scope_name" || true)"
+  if [ -z "$assigned" ]; then
+    /opt/keycloak/bin/kcadm.sh update "clients/$client_uuid/optional-client-scopes/$scope_uuid" -r "$REALM" >/dev/null
+  fi
+}
+
+ensure_offline_access_for_users() {
+  /opt/keycloak/bin/kcadm.sh get users -r "$REALM" -q max=1000 --fields username \
+    | sed -n 's/.*"username" : "\([^"]*\)".*/\1/p' \
+    | while IFS= read -r username; do
+        case "$username" in
+          service-account-*) continue ;;
+        esac
+        /opt/keycloak/bin/kcadm.sh add-roles -r "$REALM" --uusername "$username" --rolename offline_access \
+          >/dev/null
+      done
 }
 
 upsert_confidential_client() {
@@ -83,11 +118,63 @@ upsert_confidential_client() {
     -s 'webOrigins=["'"$web_origin"'"]' >/dev/null
 }
 
+upsert_message_gateway_client() {
+  client_id="$1"
+  client_uuid="$(get_client_uuid "$client_id")"
+
+  if [ -n "$client_uuid" ]; then
+    /opt/keycloak/bin/kcadm.sh update "clients/$client_uuid" -r "$REALM" \
+      -s clientId="$client_id" \
+      -s name="Aegra Message Gateway" \
+      -s description="Public device-authorization client for linked messaging identities" \
+      -s enabled=true \
+      -s protocol=openid-connect \
+      -s publicClient=true \
+      -s standardFlowEnabled=false \
+      -s directAccessGrantsEnabled=false \
+      -s serviceAccountsEnabled=false \
+      -s implicitFlowEnabled=false \
+      -s 'attributes={"oauth2.device.authorization.grant.enabled":"true"}' >/dev/null
+  else
+    /opt/keycloak/bin/kcadm.sh create clients -r "$REALM" \
+      -s clientId="$client_id" \
+      -s name="Aegra Message Gateway" \
+      -s description="Public device-authorization client for linked messaging identities" \
+      -s enabled=true \
+      -s protocol=openid-connect \
+      -s publicClient=true \
+      -s standardFlowEnabled=false \
+      -s directAccessGrantsEnabled=false \
+      -s serviceAccountsEnabled=false \
+      -s implicitFlowEnabled=false \
+      -s 'attributes={"oauth2.device.authorization.grant.enabled":"true"}' >/dev/null
+    client_uuid="$(get_client_uuid "$client_id")"
+  fi
+
+  mapper_exists="$(
+    /opt/keycloak/bin/kcadm.sh get "clients/$client_uuid/protocol-mappers/models" -r "$REALM" --fields name \
+      | sed -n 's/.*"name" : "\(audience-aegra-api\)".*/\1/p' \
+      | head -n 1
+  )"
+  if [ -z "$mapper_exists" ]; then
+    /opt/keycloak/bin/kcadm.sh create "clients/$client_uuid/protocol-mappers/models" -r "$REALM" \
+      -s name=audience-aegra-api \
+      -s protocol=openid-connect \
+      -s protocolMapper=oidc-audience-mapper \
+      -s consentRequired=false \
+      -s 'config={"included.client.audience":"aegra-api","id.token.claim":"false","access.token.claim":"true"}' >/dev/null
+  fi
+
+  ensure_optional_client_scope "$client_uuid" offline_access
+}
+
 until /opt/keycloak/bin/kcadm.sh config credentials --server "$KEYCLOAK_URL" --realm master --user "$KEYCLOAK_ADMIN_USER" --password "$KEYCLOAK_ADMIN_PASSWORD" >/dev/null 2>&1; do
   sleep 2
 done
 
 update_client_secret "$API_CLIENT_ID" "$API_CLIENT_SECRET"
+upsert_message_gateway_client "$MESSAGE_GATEWAY_CLIENT_ID"
+ensure_offline_access_for_users
 
 if [ -n "$NEXTAUTH_CLIENT_SECRET" ]; then
   upsert_confidential_client \

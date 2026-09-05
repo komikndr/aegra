@@ -1,0 +1,49 @@
+services:
+  echarts-renderer:
+    profiles: ["messaging"]
+    build:
+      context: ./services/echarts-renderer
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/health').then(response => process.exit(response.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  message-gateway:
+    profiles: ["messaging"]
+    build:
+      context: .
+      dockerfile: deployments/docker/Dockerfile.message-gateway
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      MESSAGE_GATEWAY_DATABASE_HOST: postgres
+      MESSAGE_GATEWAY_DATABASE_PORT: 5432
+      MESSAGE_GATEWAY_DATABASE_USER: ${POSTGRES_USER:-user}
+      MESSAGE_GATEWAY_DATABASE_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      MESSAGE_GATEWAY_DATABASE_NAME: ${POSTGRES_DB:-aegra}
+      MESSAGE_GATEWAY_ENCRYPTION_KEY: ${MESSAGE_GATEWAY_ENCRYPTION_KEY:?MESSAGE_GATEWAY_ENCRYPTION_KEY is required}
+      MESSAGE_GATEWAY_HMAC_KEY: ${MESSAGE_GATEWAY_HMAC_KEY:?MESSAGE_GATEWAY_HMAC_KEY is required}
+      MESSAGE_GATEWAY_AEGRA_URL: http://aegra:${PORT:-2026}
+      MESSAGE_GATEWAY_CHART_RENDERER_URL: http://echarts-renderer:8787
+      MESSAGE_GATEWAY_KEYCLOAK_INTERNAL_ISSUER: http://keycloak:8080/realms/${KEYCLOAK_REALM:-aegra}
+      MESSAGE_GATEWAY_KEYCLOAK_BROWSER_ISSUER: ${KEYCLOAK_ISSUER:-http://localhost:8080/realms/aegra}
+      MESSAGE_GATEWAY_KEYCLOAK_CLIENT_ID: ${MESSAGE_GATEWAY_KEYCLOAK_CLIENT_ID:-aegra-message-gateway}
+      MESSAGE_GATEWAY_TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:?TELEGRAM_BOT_TOKEN is required}
+      MESSAGE_GATEWAY_TELEGRAM_ALLOWED_USERS: ${TELEGRAM_ALLOWED_USERS:?TELEGRAM_ALLOWED_USERS is required}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      aegra:
+        condition: service_healthy
+      keycloak:
+        condition: service_started
+      echarts-renderer:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8642/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

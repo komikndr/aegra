@@ -1,7 +1,7 @@
 {
   "realm": "aegra",
   "enabled": true,
-  "displayName": "Aegra",
+  "displayName": "ONYX ASSISTANT",
   "roles": {
     "realm": [
       {
@@ -134,6 +134,37 @@
       ]
     },
     {
+      "clientId": "aegra-message-gateway",
+      "name": "Aegra Message Gateway",
+      "description": "Public device-authorization client for linked messaging identities",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "standardFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "implicitFlowEnabled": false,
+      "attributes": {
+        "oauth2.device.authorization.grant.enabled": "true"
+      },
+      "optionalClientScopes": [
+        "offline_access"
+      ],
+      "protocolMappers": [
+        {
+          "name": "audience-aegra-api",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "aegra-api",
+            "id.token.claim": "false",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    },
+    {
       "clientId": "minio-console",
       "name": "MinIO Console",
       "description": "Confidential OIDC client for MinIO console login",
@@ -172,7 +203,8 @@
         }
       ],
       "realmRoles": [
-        "SuperAdmin"
+        "SuperAdmin",
+        "offline_access"
       ]
     },
     {
@@ -190,7 +222,8 @@
         }
       ],
       "realmRoles": [
-        "SuperAdmin"
+        "SuperAdmin",
+        "offline_access"
       ]
     },
     {
@@ -208,7 +241,8 @@
         }
       ],
       "realmRoles": [
-        "SuperAdmin"
+        "SuperAdmin",
+        "offline_access"
       ]
     },
     {
@@ -226,7 +260,8 @@
         }
       ],
       "realmRoles": [
-        "Executive"
+        "Executive",
+        "offline_access"
       ]
     },
     {
@@ -244,7 +279,8 @@
         }
       ],
       "realmRoles": [
-        "Staff"
+        "Staff",
+        "offline_access"
       ]
     },
     {
@@ -262,7 +298,8 @@
         }
       ],
       "realmRoles": [
-        "Senior Data Engineer"
+        "Senior Data Engineer",
+        "offline_access"
       ]
     }
   ]

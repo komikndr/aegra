@@ -1,0 +1,13 @@
+{
+  "name": "aegra-echarts-renderer",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Internal PNG renderer for Aegra ECharts options",
+  "scripts": {
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "1.0.2",
+    "echarts": "6.0.0"
+  }
+}

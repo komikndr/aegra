@@ -86,6 +86,7 @@ services:
       - MINIO_OIDC_CLIENT_ID=${MINIO_OIDC_CLIENT_ID:-minio-console}
       - MINIO_OIDC_CLIENT_SECRET=${MINIO_OIDC_CLIENT_SECRET:-minio-console-local-secret}
       - MINIO_OIDC_REDIRECT_URI=${MINIO_OIDC_REDIRECT_URI:-http://localhost:9001/oauth_callback}
+      - MESSAGE_GATEWAY_KEYCLOAK_CLIENT_ID=${MESSAGE_GATEWAY_KEYCLOAK_CLIENT_ID:-aegra-message-gateway}
     volumes:
       - ./ops/keycloak:/opt/keycloak-init:ro
     entrypoint: ["/bin/sh", "/opt/keycloak-init/init-minio-client.sh"]
