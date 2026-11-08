@@ -1,0 +1,206 @@
+---
+- ansible.builtin.import_playbook: preflight.yml
+
+- name: Build and update application containers from exact local release commits
+  hosts: onyx_staging
+  gather_facts: false
+  vars:
+    onyx_release: v1.6.0
+    onyx_backend_source: "{{ playbook_dir }}/../.."
+    onyx_backup_id: "{{ now(utc=true, fmt='%Y%m%dT%H%M%SZ') }}"
+  pre_tasks:
+    - name: Require explicit deployment and local frontend source
+      ansible.builtin.assert:
+        that:
+          - onyx_deploy | default(false) | bool
+          - onyx_frontend_source is defined
+          - not ansible_check_mode
+        fail_msg: Run preflight.yml first. Deployment requires onyx_deploy=true and onyx_frontend_source.
+
+    - name: Load sanitized inspection
+      ansible.builtin.set_fact:
+        onyx_state: "{{ onyx_inspection.stdout | from_json }}"
+
+    - name: Require existing infrastructure and persistent application data
+      ansible.builtin.assert:
+        that:
+          - onyx_state.backend.blockers | length == 0
+          - onyx_state.frontend.blockers | length == 0
+        fail_msg: Resolve the blockers in the preflight report before deployment.
+
+    - name: Define the two application releases
+      ansible.builtin.set_fact:
+        onyx_targets:
+          - name: backend
+            source: "{{ onyx_backend_source }}"
+            project: "{{ onyx_state.backend.project }}"
+            service: aegra
+            env_file: "{{ onyx_secret_dir }}/env.staging.backend"
+          - name: frontend
+            source: "{{ onyx_frontend_source }}"
+            project: "{{ onyx_state.frontend.project }}"
+            service: app
+            env_file: "{{ onyx_secret_dir }}/env.staging.frontend"
+
+    - name: Resolve exact release commits on the controller
+      ansible.builtin.command:
+        argv: [git, -C, "{{ item.source }}", rev-parse, "{{ onyx_release }}^{commit}"]
+      delegate_to: localhost
+      loop: "{{ onyx_targets }}"
+      register: onyx_commits
+      changed_when: false
+
+  tasks:
+    - name: Allocate a temporary archive directory on the controller
+      ansible.builtin.tempfile:
+        state: directory
+        prefix: onyx-release-
+      delegate_to: localhost
+      register: onyx_archives
+
+    - name: Prepare and deploy the release
+      block:
+        - name: Export tracked release files only
+          ansible.builtin.command:
+            argv:
+              - git
+              - -C
+              - "{{ item.item.source }}"
+              - archive
+              - --format=tar
+              - "--output={{ onyx_archives.path }}/{{ item.item.name }}.tar"
+              - "{{ item.stdout }}"
+          loop: "{{ onyx_commits.results }}"
+          delegate_to: localhost
+          changed_when: true
+
+        - name: Create private source and backup directories on the VM
+          ansible.builtin.file:
+            path: "{{ item }}"
+            state: directory
+            mode: '0700'
+          loop:
+            - "{{ onyx_release_root }}"
+            - "{{ onyx_backup_root }}"
+
+        - name: Create immutable-identity release directories
+          ansible.builtin.file:
+            path: "{{ onyx_release_root }}/{{ item.item.name }}-{{ item.stdout }}"
+            state: directory
+            mode: '0700'
+          loop: "{{ onyx_commits.results }}"
+
+        - name: Transfer release source without environment files or untracked work
+          ansible.builtin.unarchive:
+            src: "{{ onyx_archives.path }}/{{ item.item.name }}.tar"
+            dest: "{{ onyx_release_root }}/{{ item.item.name }}-{{ item.stdout }}"
+          loop: "{{ onyx_commits.results }}"
+
+        - name: Define release source paths and stable backup ID
+          ansible.builtin.set_fact:
+            onyx_new_backend: "{{ onyx_release_root }}/backend-{{ onyx_commits.results[0].stdout }}"
+            onyx_new_frontend: "{{ onyx_release_root }}/frontend-{{ onyx_commits.results[1].stdout }}"
+            onyx_saved_backup_id: "{{ onyx_backup_id }}"
+
+        - name: Preserve existing application data mounts in a release override
+          ansible.builtin.copy:
+            dest: "{{ onyx_release_root }}/{{ item.item.name }}-{{ item.stdout }}/.onyx-runtime.json"
+            mode: '0600'
+            content: "{{ onyx_state[item.item.name].runtime_override | to_nice_json }}"
+          loop: "{{ onyx_commits.results }}"
+
+        - name: Reject the old frontend Docker build path before touching services
+          ansible.builtin.command:
+            argv:
+              - "{{ ansible_python_interpreter | default('/usr/bin/python3') }}"
+              - -c
+              - >-
+                from pathlib import Path; p=Path('.');
+                assert '/app/.next-local' in (p/'Dockerfile').read_text(),
+                'Release Dockerfile does not match next.config.ts; finalize the frontend release first.'
+            chdir: "{{ onyx_new_frontend }}"
+          changed_when: false
+
+        - name: Build both images before replacing either running application
+          ansible.builtin.command:
+            argv: [sh, ./stack.sh, staging, -f, .onyx-runtime.json, build, "{{ item.item.service }}"]
+            chdir: "{{ onyx_release_root }}/{{ item.item.name }}-{{ item.stdout }}"
+          environment:
+            STAGING_ENV_FILE: "{{ item.item.env_file }}"
+            COMPOSE_PROJECT_NAME: "{{ item.item.project }}"
+          loop: "{{ onyx_commits.results }}"
+          no_log: true
+          changed_when: true
+
+        - name: Back up PostgreSQL before application migrations
+          ansible.builtin.shell:
+            cmd: >-
+              umask 077;
+              sh ./stack.sh staging exec -T postgres sh -c
+              'exec pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc'
+              > {{ (onyx_backup_root + '/aegra-' + onyx_saved_backup_id + '.dump') | quote }}
+            chdir: "{{ onyx_backend_dir }}"
+          environment:
+            STAGING_ENV_FILE: "{{ onyx_secret_dir }}/env.staging.backend"
+            COMPOSE_PROJECT_NAME: "{{ onyx_state.backend.project }}"
+          no_log: true
+          changed_when: true
+
+        - name: Preserve the previous deployment identity
+          ansible.builtin.copy:
+            dest: "{{ onyx_backup_root }}/deployment-{{ onyx_saved_backup_id }}.json"
+            mode: '0600'
+            content: "{{ {'previous': onyx_state, 'backend_source': onyx_new_backend, 'frontend_source': onyx_new_frontend, 'release': onyx_release} | to_nice_json }}"
+
+        - name: Start the updated backend without replacing infrastructure
+          ansible.builtin.command:
+            argv: [sh, ./stack.sh, staging, -f, .onyx-runtime.json, up, -d, --no-deps, aegra]
+            chdir: "{{ onyx_new_backend }}"
+          environment:
+            STAGING_ENV_FILE: "{{ onyx_secret_dir }}/env.staging.backend"
+            COMPOSE_PROJECT_NAME: "{{ onyx_state.backend.project }}"
+          no_log: true
+          changed_when: true
+
+        - name: Wait for backend health
+          ansible.builtin.uri:
+            url: "{{ onyx_backend_health_url | default('http://127.0.0.1:8111/health') }}"
+            status_code: 200
+          register: onyx_backend_health
+          until: onyx_backend_health.status | default(0) == 200
+          retries: 60
+          delay: 3
+
+        - name: Start the updated frontend without replacing MinIO
+          ansible.builtin.command:
+            argv: [sh, ./stack.sh, staging, -f, .onyx-runtime.json, up, -d, --no-deps, app]
+            chdir: "{{ onyx_new_frontend }}"
+          environment:
+            STAGING_ENV_FILE: "{{ onyx_secret_dir }}/env.staging.frontend"
+            COMPOSE_PROJECT_NAME: "{{ onyx_state.frontend.project }}"
+          no_log: true
+          changed_when: true
+
+        - name: Wait for frontend HTTP readiness
+          ansible.builtin.uri:
+            url: "{{ onyx_frontend_health_url | default('http://127.0.0.1:3000') }}"
+            status_code: 200
+          register: onyx_frontend_health
+          until: onyx_frontend_health.status | default(0) == 200
+          retries: 40
+          delay: 3
+
+        - name: Report the deployed release and future inventory paths
+          ansible.builtin.debug:
+            msg:
+              release: "{{ onyx_release }}"
+              backend_source: "{{ onyx_new_backend }}"
+              frontend_source: "{{ onyx_new_frontend }}"
+              backup_directory: "{{ onyx_backup_root }}"
+              note: Update inventory repository paths to these release directories before the next inspection.
+      always:
+        - name: Remove temporary controller archives
+          ansible.builtin.file:
+            path: "{{ onyx_archives.path }}"
+            state: absent
+          delegate_to: localhost

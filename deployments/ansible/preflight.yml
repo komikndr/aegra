@@ -1,0 +1,21 @@
+---
+- name: Inspect the existing ONYX staging deployment
+  hosts: onyx_staging
+  gather_facts: false
+  tasks:
+    - name: Inspect Compose configuration and existing containers without exposing secrets
+      ansible.builtin.script:
+        cmd: >-
+          inspect_stack.py
+          --backend {{ onyx_backend_dir | quote }}
+          --frontend {{ onyx_frontend_dir | quote }}
+          --secrets {{ onyx_secret_dir | quote }}
+        executable: "{{ ansible_python_interpreter | default('/usr/bin/python3') }}"
+      register: onyx_inspection
+      changed_when: false
+      check_mode: false
+      no_log: true
+
+    - name: Show the sanitized deployment report
+      ansible.builtin.debug:
+        msg: "{{ onyx_inspection.stdout | from_json }}"
