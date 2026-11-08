@@ -88,18 +88,28 @@ from sqlalchemy.engine import Engine
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from aegra_api.api.analytics_connections import router as analytics_connections_router
+from aegra_api.api.dbchat import create_dbchat_router
+from aegra_api.api.paper_trading import router as paper_router
+from aegra_api.api.swarm import router as swarm_router
 from aegra_api.core.agent_access import ensure_graph_access, has_superadmin_access
 from aegra_api.core.auth_deps import require_auth
+from aegra_api.core.operations_access import require_operations_access
 from aegra_api.core.orm import ExecutiveArtifact, PipelineApiKey, PipelineRun, PipelineWorkflow, Thread, get_session
 from aegra_api.models.auth import User
 from aegra_api.security.sql_readonly import UnsafeSqlError, execute_read_only_sql, validate_read_only_sql
+from aegra_api.services.swarm_dispatch import swarm_lifespan
 
 # Create your FastAPI app instance
 # This will be merged with Aegra's core routes
 app = FastAPI(
     title="Custom Routes Example",
     description="Example custom endpoints for Aegra with authentication",
+    lifespan=swarm_lifespan,
 )
+app.include_router(analytics_connections_router)
+app.include_router(swarm_router)
+app.include_router(paper_router)
 
 logger = logging.getLogger(__name__)
 
@@ -1421,6 +1431,7 @@ async def _resolve_pipeline_actor(
         return api_key.user_id, workflow
 
     user = await require_auth(request)
+    require_operations_access(user)
     workflow = await _get_user_workflow(session, request_payload.workflowId, user.identity)
     return user.identity, workflow
 
@@ -1527,233 +1538,16 @@ async def model_info(agent_id: str | None = Query(default=None, alias="agentId")
     }
 
 
-@app.get("/dbchat/connections")
-async def list_dbchat_connections(user: User = Depends(require_auth)):
-    """List DBChat connections. Currently exposes the configured analytic DB connection."""
-    return {"connections": _available_dbchat_connections(), "user": user.identity}
+app.include_router(create_dbchat_router(_get_dbchat_adapter, _available_dbchat_connections))
 
 
-@app.get("/dbchat/connections/{connection_id}/catalog")
-async def get_dbchat_catalog(
-    connection_id: str,
-    include_system: bool = Query(default=False, alias="includeSystem"),
-    user: User = Depends(require_auth),
-):
-    """Return SQLRooms-compatible catalog arrays: databases, schemas, tables."""
-    try:
-        adapter = _get_dbchat_adapter(connection_id)
-        return adapter.catalog(include_system=include_system)
-    except HTTPException:
-        raise
-    except SQLAlchemyError as exc:
-        logger.warning("DBChat catalog failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
-        raise HTTPException(status_code=502, detail=f"Could not read database catalog: {exc}") from exc
-
-
-@app.get("/dbchat/connections/{connection_id}/tree")
-async def get_dbchat_tree(
-    connection_id: str,
-    include_system: bool = Query(default=False, alias="includeSystem"),
-    user: User = Depends(require_auth),
-):
-    """Return a normalized side-panel tree for DBChat schema browsing."""
-    try:
-        adapter = _get_dbchat_adapter(connection_id)
-        return adapter.tree(include_system=include_system)
-    except HTTPException:
-        raise
-    except SQLAlchemyError as exc:
-        logger.warning("DBChat tree failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
-        raise HTTPException(status_code=502, detail=f"Could not read database tree: {exc}") from exc
-
-
-@app.get("/dbchat/connections/{connection_id}/tables/{table}/columns")
-async def describe_dbchat_table(
-    connection_id: str,
-    table: str,
-    schema: str | None = Query(default=None),
-    database: str | None = Query(default=None),
-    user: User = Depends(require_auth),
-):
-    """Describe a table or view, including columns and adapter-provided index metadata."""
-    try:
-        adapter = _get_dbchat_adapter(connection_id)
-        return adapter.describe_table(table=table, schema=schema, database=database)
-    except HTTPException:
-        raise
-    except SQLAlchemyError as exc:
-        logger.warning(
-            "DBChat describe failed connection=%s table=%s schema=%s user=%s error=%s",
-            connection_id,
-            table,
-            schema,
-            user.identity,
-            exc,
-        )
-        raise HTTPException(status_code=502, detail=f"Could not describe table: {exc}") from exc
-
-
-@app.get("/dbchat/connections/{connection_id}/tables/{table}/sample")
-async def preview_dbchat_table(
-    connection_id: str,
-    table: str,
-    schema: str | None = Query(default=None),
-    database: str | None = Query(default=None),
-    limit: int = Query(default=50, ge=1, le=200),
-    user: User = Depends(require_auth),
-):
-    """Return a limited read-only preview of a table or view."""
-    try:
-        adapter = _get_dbchat_adapter(connection_id)
-        return adapter.preview_table(table=table, schema=schema, database=database, limit=limit)
-    except HTTPException:
-        raise
-    except SQLAlchemyError as exc:
-        logger.warning(
-            "DBChat preview failed connection=%s table=%s schema=%s user=%s error=%s",
-            connection_id,
-            table,
-            schema,
-            user.identity,
-            exc,
-        )
-        raise HTTPException(status_code=502, detail=f"Could not preview table: {exc}") from exc
-
-
-@app.post("/dbchat/connections/{connection_id}/query")
-async def query_dbchat_connection(
-    connection_id: str,
-    payload: DbChatQueryRequest,
-    user: User = Depends(require_auth),
-):
-    """Run a read-only SQL query and return JSON rows for the DBChat workbench."""
-    try:
-        adapter = _get_dbchat_adapter(connection_id)
-        result = adapter.query(payload.sql, limit=payload.limit)
-        logger.info(
-            "DBChat query completed connection=%s user=%s rows=%s",
-            connection_id,
-            user.identity,
-            result.get("rowCount"),
-        )
-        return result
-    except HTTPException:
-        raise
-    except SQLAlchemyError as exc:
-        logger.warning("DBChat query failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
-        raise HTTPException(status_code=502, detail=f"Could not execute query: {exc}") from exc
-
-
-@app.post("/dbchat/connections/{connection_id}/chat")
-async def chat_dbchat_connection(
-    connection_id: str,
-    payload: DbChatChatRequest,
-    user: User = Depends(require_auth),
-):
-    """Answer DBChat questions and return executed DB artifacts separately from prose."""
-    message = payload.message.strip()
-    if not message:
-        raise HTTPException(status_code=422, detail="message is required")
-
-    try:
-        adapter = _get_dbchat_adapter(connection_id)
-        selected_tables = _normalize_dbchat_selected_tables(payload)
-        context_mode = _normalize_dbchat_context_mode(payload.contextMode)
-        scope = _format_dbchat_scope(adapter, selected_tables, context_mode)
-        model_name = _get_configured_model()
-        model = load_chat_model(model_name)
-        model = apply_reasoning_effort(model, model_name, _normalize_dbchat_reasoning_effort(payload.reasoningEffort))
-        wants_rows = _dbchat_user_wants_rows(message)
-        wants_chart = _dbchat_user_wants_chart(message)
-        system_prompt = (
-            "You are DBChat, a natural data analyst assistant embedded in a SQL workbench. "
-            "Answer conversationally like a normal chat assistant. Do not make the response formulaic. "
-            "Use the provided schema context to answer database questions and explain table relationships when useful. "
-            "If data must be queried or a chart must be built, append exactly one fenced sql block at the end; "
-            "do not put SQL in the prose and do not include chart JSON. The application will execute safe read-only SQL "
-            "and render query/chart artifacts separately. If the user asks about SQL itself, explain it normally. "
-            "If the schema context is insufficient, say what table or column is needed. "
-            f"Context mode: {context_mode}."
-            + (
-                " In lock mode, use only the locked tables. "
-                if context_mode == "lock"
-                else " Suggested tables are hints only; all listed tables are available. "
-            )
-            + "\n\n"
-            f"Connection: {adapter.title} ({adapter.connection_info().get('engineId', 'database')})\n"
-            f"Schema context:\n{scope}"
-        )
-        response = await model.ainvoke(
-            [
-                SystemMessage(content=system_prompt),
-                *_dbchat_history_messages(payload.history),
-                HumanMessage(content=message[:8000]),
-            ]
-        )
-        visible_answer = _get_dbchat_visible_message_text(response)
-        answer = _strip_dbchat_sql_blocks(visible_answer)
-        reasoning = _extract_dbchat_reasoning(response)
-        generated_sql = (
-            _dbchat_selected_table_sql(adapter, selected_tables)
-            if _dbchat_user_wants_preview(message) and not wants_chart and selected_tables
-            else None
-        )
-        generated_sql = generated_sql or _extract_dbchat_sql(visible_answer)
-        query_result: dict[str, Any] | None = None
-        executed_sql: str | None = None
-        if (
-            generated_sql
-            and (wants_rows or wants_chart)
-            and _is_read_only_dbchat_sql(generated_sql, adapter.engine.dialect.name)
-        ):
-            if context_mode == "lock":
-                _validate_dbchat_lock_sql(generated_sql, selected_tables)
-            query_result = adapter.query(generated_sql, limit=50)
-            executed_sql = generated_sql
-        chart_option = _build_dbchat_chart_option(message, query_result) if wants_chart else None
-        tool_events: list[dict[str, Any]] = []
-        if executed_sql and query_result is not None:
-            tool_events.append(
-                {
-                    "type": "sql",
-                    "sql": executed_sql,
-                    "rowCount": query_result.get("rowCount", 0),
-                    "limit": query_result.get("limit", 50),
-                }
-            )
-        if chart_option is not None:
-            tool_events.append({"type": "chart", "chartOption": chart_option})
-        if query_result is not None and wants_rows and not answer:
-            answer = "Here are the rows I found."
-        if chart_option is not None and not answer:
-            answer = "Here is the chart."
-        logger.info("DBChat chat completed connection=%s user=%s", connection_id, user.identity)
-        return {
-            "connectionId": connection_id,
-            "response": answer or "I could not produce a DBChat response.",
-            "reasoning": reasoning,
-            "generatedSql": executed_sql,
-            "queryResult": query_result,
-            "chartOption": chart_option,
-            "toolEvents": tool_events,
-            "contextMode": context_mode,
-            "selectedTables": [table.model_dump() for table in selected_tables],
-            "selectedTable": selected_tables[0].model_dump() if selected_tables else None,
-        }
-    except HTTPException:
-        raise
-    except SQLAlchemyError as exc:
-        logger.warning("DBChat chat schema failed connection=%s user=%s error=%s", connection_id, user.identity, exc)
-        raise HTTPException(status_code=502, detail=f"Could not read database schema for chat: {exc}") from exc
-
-
-@app.get("/pipeline/models")
+@app.get("/pipeline/models", dependencies=[Depends(require_operations_access)])
 async def list_pipeline_models(user: User = Depends(require_auth)):
     """Return model choices usable by side-chain pipeline formatter nodes."""
     return {"models": _load_pipeline_model_choices(), "user": user.identity}
 
 
-@app.get("/pipeline/workflows")
+@app.get("/pipeline/workflows", dependencies=[Depends(require_operations_access)])
 async def list_pipeline_workflows(
     user: User = Depends(require_auth),
     session: AsyncSession = Depends(get_session),
@@ -1766,7 +1560,7 @@ async def list_pipeline_workflows(
     return {"workflows": [_serialize_workflow(workflow) for workflow in result.all()]}
 
 
-@app.post("/pipeline/workflows")
+@app.post("/pipeline/workflows", dependencies=[Depends(require_operations_access)])
 async def create_pipeline_workflow(
     payload: PipelineWorkflowRequest,
     user: User = Depends(require_auth),
@@ -1791,7 +1585,7 @@ async def create_pipeline_workflow(
     return {"workflow": _serialize_workflow(workflow)}
 
 
-@app.get("/pipeline/workflows/{workflow_id}")
+@app.get("/pipeline/workflows/{workflow_id}", dependencies=[Depends(require_operations_access)])
 async def get_pipeline_workflow(
     workflow_id: str,
     user: User = Depends(require_auth),
@@ -1801,7 +1595,7 @@ async def get_pipeline_workflow(
     return {"workflow": _serialize_workflow(workflow)}
 
 
-@app.put("/pipeline/workflows/{workflow_id}")
+@app.put("/pipeline/workflows/{workflow_id}", dependencies=[Depends(require_operations_access)])
 async def update_pipeline_workflow(
     workflow_id: str,
     payload: PipelineWorkflowUpdateRequest,
@@ -1823,7 +1617,7 @@ async def update_pipeline_workflow(
     return {"workflow": _serialize_workflow(workflow)}
 
 
-@app.delete("/pipeline/workflows/{workflow_id}")
+@app.delete("/pipeline/workflows/{workflow_id}", dependencies=[Depends(require_operations_access)])
 async def delete_pipeline_workflow(
     workflow_id: str,
     user: User = Depends(require_auth),
@@ -1835,7 +1629,7 @@ async def delete_pipeline_workflow(
     return {"ok": True, "workflowId": workflow_id}
 
 
-@app.get("/pipeline/workflows/{workflow_id}/keys")
+@app.get("/pipeline/workflows/{workflow_id}/keys", dependencies=[Depends(require_operations_access)])
 async def list_pipeline_api_keys(
     workflow_id: str,
     user: User = Depends(require_auth),
@@ -1850,7 +1644,7 @@ async def list_pipeline_api_keys(
     return {"keys": [_serialize_api_key(api_key) for api_key in result.all()]}
 
 
-@app.post("/pipeline/workflows/{workflow_id}/keys")
+@app.post("/pipeline/workflows/{workflow_id}/keys", dependencies=[Depends(require_operations_access)])
 async def create_pipeline_api_key(
     workflow_id: str,
     payload: PipelineApiKeyRequest,
@@ -1872,7 +1666,7 @@ async def create_pipeline_api_key(
     return {"key": _serialize_api_key(api_key), "secret": raw_key}
 
 
-@app.delete("/pipeline/workflows/{workflow_id}/keys/{key_id}")
+@app.delete("/pipeline/workflows/{workflow_id}/keys/{key_id}", dependencies=[Depends(require_operations_access)])
 async def revoke_pipeline_api_key(
     workflow_id: str,
     key_id: str,

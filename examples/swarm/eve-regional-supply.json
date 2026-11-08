@@ -1,0 +1,58 @@
+{
+  "schema_version": "1",
+  "simulation": true,
+  "scenario_id": "eve-regional-supply",
+  "description": "All prices, volumes, news, stock, and human responses are synthetic. Region and item identifiers describe the intended ESI mapping only.",
+  "objective": {
+    "id": "sim-eve-supply-objective-001",
+    "goal": "Assess seven-day Tritanium stocking and logistics options for The Forge using market history, news, current stock, and board findings.",
+    "horizon_days": 7,
+    "region_id": 10000002,
+    "type_id": 34
+  },
+  "market_history": {
+    "reference": "fixture:eve-market-history-v1",
+    "source": "synthetic; intended mapping: ESI regional daily market history",
+    "retrieved_at": "2026-01-01T00:00:00Z",
+    "price_unit": "ISK per item",
+    "volume_unit": "items per day",
+    "observations": [
+      {"date": "2025-12-25", "average": 4.0, "volume": 1000000},
+      {"date": "2025-12-26", "average": 4.1, "volume": 1050000},
+      {"date": "2025-12-27", "average": 4.0, "volume": 980000},
+      {"date": "2025-12-28", "average": 4.2, "volume": 1100000},
+      {"date": "2025-12-29", "average": 4.3, "volume": 1150000},
+      {"date": "2025-12-30", "average": 4.4, "volume": 1200000},
+      {"date": "2025-12-31", "average": 4.5, "volume": 1180000}
+    ]
+  },
+  "news": {
+    "reference": "fixture:eve-news-v1",
+    "published_at": "2025-12-31T12:00:00Z",
+    "retrieved_at": "2026-01-01T00:00:00Z",
+    "source": "synthetic-news",
+    "text": "A fictional community announcement proposes increased manufacturing activity. Participation and market impact are unverified. This is not a real EVE announcement."
+  },
+  "prior_board_finding": {
+    "id": "sim-eve-stock-finding-001",
+    "reference": "fixture:eve-stock-snapshot-v1",
+    "observed_at": "2025-12-30T12:00:00Z",
+    "summary": "Synthetic warehouse stock: 200000 items."
+  },
+  "operator_feedback": {
+    "id": "sim-eve-stock-correction-001",
+    "observed_at": "2026-01-01T01:00:00Z",
+    "reference": "fixture:eve-stock-snapshot-v2",
+    "supersedes": "sim-eve-stock-finding-001",
+    "stock_items": 700000,
+    "text": "Synthetic warehouse receipt increased stock after the prior snapshot. Reassess stocking requirements; this report does not prove a market purchase was executed."
+  },
+  "future_runner_checks": [
+    "Two specialists examine market data and news provenance independently.",
+    "The coordinator distinguishes historical regional prices from current executable orders.",
+    "The coordinator treats speculative news as uncertain evidence, not a confirmed demand forecast.",
+    "Operator correction creates a new assessment version without erasing the previous finding.",
+    "Duplicate feedback does not create a duplicate task or notification.",
+    "No game action is implied by an assessment or an operator acknowledgment."
+  ]
+}

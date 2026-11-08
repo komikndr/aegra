@@ -23,7 +23,13 @@
         "analytic_executive": "./graphs/analytic_agent/graph.py:executive_graph",
         "analytic_office": "./graphs/analytic_agent/graph.py:office_graph",
         "analytic_artifact_editor": "./graphs/analytic_agent/graph.py:artifact_editor_graph",
-        "analytic_dbchat": "./graphs/dbchat_agent/graph.py:graph"
+        "analytic_dbchat": "./graphs/dbchat_agent/graph.py:graph",
+        "swarm_review": "./graphs/swarm_review/graph.py:graph",
+    "swarm_planner": "./graphs/swarm_planner/graph.py:graph",
+    "swarm_strategy": "./graphs/swarm_strategy/graph.py:graph",
+        "paper_trader": "./graphs/paper_trader/graph.py:graph",
+        "coordinator": "./graphs/coordinator/graph.py:graph",
+        "coordinator_chat": "./graphs/head_coordinator/graph.py:graph"
     },
     "graph_access": {
         "agent": ["SuperAdmin"],
@@ -48,7 +54,13 @@
         "analytic_executive": ["Executive", "Senior Data Engineer"],
         "analytic_office": ["Executive", "Senior Data Engineer"],
         "analytic_artifact_editor": ["Executive", "Senior Data Engineer"],
-        "analytic_dbchat": ["Executive", "Senior Data Engineer"]
+        "analytic_dbchat": ["SuperAdmin"],
+        "swarm_review": ["SuperAdmin"],
+      "swarm_planner": ["SuperAdmin"],
+      "swarm_strategy": ["SuperAdmin"],
+        "paper_trader": ["SuperAdmin"],
+        "coordinator": ["SuperAdmin"],
+        "coordinator_chat": ["SuperAdmin"]
     },
     "http": {"app": "./custom_routes_example.py:app", "enable_custom_route_auth": true},
     "auth": {"path": "./keycloak_auth.py:auth"}

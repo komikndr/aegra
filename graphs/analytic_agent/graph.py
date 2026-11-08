@@ -2,11 +2,13 @@
 
 import re
 from datetime import datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.config import get_config
 from langgraph.graph import StateGraph
+from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
 from react_agent.model_config import resolve_agent_model
@@ -21,6 +23,8 @@ from react_agent.utils import (
     load_chat_model,
 )
 
+from analytic_agent.airflow_tools import get_environment_airflow_tools
+from analytic_agent.capabilities import capability_prompt, get_tools
 from analytic_agent.context import (
     ArtifactEditorContext,
     ChatContext,
@@ -28,7 +32,7 @@ from analytic_agent.context import (
     OfficeContext,
 )
 from analytic_agent.context import Context as BaseContext
-from analytic_agent.tools import TOOLS
+from analytic_agent.tools import analytic_list_tables
 
 _SCHEMA_DISCOVERY_REQUEST = re.compile(
     r"(?:\b(?:list|show|available|what|which|check|inspect|describe)\b.*\b(?:table|tables|view|views|schema|columns?)\b|"
@@ -60,10 +64,13 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         min_recent_messages=runtime.context.num_limit_min_recent_messages,
     )
     base_model = load_chat_model(model_config.model, base_url=model_config.base_url, api_key=model_config.api_key)
-    if requires_initial_table_listing(state):
-        model = bind_tools_with_parallel(base_model, [TOOLS[0]], tool_choice="required")
+    tools = [*get_tools(runtime.context), *get_environment_airflow_tools()]
+    if analytic_list_tables in tools and requires_initial_table_listing(state):
+        model = bind_tools_with_parallel(base_model, [analytic_list_tables], tool_choice="required")
+    elif tools:
+        model = bind_tools_with_parallel(base_model, tools)
     else:
-        model = bind_tools_with_parallel(base_model, TOOLS)
+        model = base_model
     model = apply_reasoning_effort(
         model,
         model_config.model,
@@ -72,7 +79,7 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         api_key=model_config.api_key,
     )
     system_messages = build_system_prompt_messages(
-        runtime.context.system_prompt,
+        runtime.context.system_prompt + capability_prompt(tools),
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
         runtime.context.user_memory,
     )
@@ -120,10 +127,18 @@ def route_model_output(state: State) -> Literal["__end__", "tools"]:
     return "tools"
 
 
-def build_graph(context_schema: type[BaseContext], name: str):
+async def call_tools(state: State, runtime: Runtime[BaseContext]) -> dict[str, Any]:
+    """Execute only tools enabled for this invocation, including replayed tool calls."""
+    tools = [*get_tools(runtime.context), *get_environment_airflow_tools()]
+    return await ToolNode(tools).ainvoke(state, get_config())
+
+
+def build_graph(
+    context_schema: type[BaseContext], name: str
+) -> CompiledStateGraph[State, BaseContext, InputState, State]:
     builder = StateGraph(State, input_schema=InputState, context_schema=context_schema)
     builder.add_node("call_model", call_model)
-    builder.add_node("tools", ToolNode(TOOLS))
+    builder.add_node("tools", call_tools)
     builder.add_edge("__start__", "call_model")
     builder.add_conditional_edges("call_model", route_model_output)
     builder.add_edge("tools", "call_model")

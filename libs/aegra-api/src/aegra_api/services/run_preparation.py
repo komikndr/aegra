@@ -26,6 +26,7 @@ from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.models import Run, RunCreate, User
 from aegra_api.models.run_job import RunBehavior, RunExecution, RunIdentity, RunJob
+from aegra_api.security.trusted_context import sanitize_execution_config, sanitize_execution_context
 from aegra_api.services.executor import executor
 from aegra_api.services.langgraph_service import get_langgraph_service
 from aegra_api.services.run_status import set_thread_status
@@ -308,8 +309,8 @@ async def _prepare_run(
 
     ensure_graph_access(user, assistant.graph_id)
 
-    config = _merge_jsonb(assistant.config, config)
-    context = _merge_jsonb(assistant.context, context)
+    config = sanitize_execution_config(_merge_jsonb(assistant.config, config))
+    context = sanitize_execution_context(_merge_jsonb(assistant.context, context))
 
     # Validate the assistant's graph exists
     available_graphs = langgraph_service.list_graphs()

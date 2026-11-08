@@ -51,6 +51,13 @@ class Context(BaseContext):
         default=4,
         metadata={"description": "Default number of vector search results returned by the KMS agent."},
     )
+    kms_text_search_fields: str = field(
+        default="",
+        metadata={
+            "description": "Comma-separated OpenSearch fields used for native text search. "
+            "When empty, OpenSearch uses its default searchable fields."
+        },
+    )
 
 
 @dataclass(kw_only=True)

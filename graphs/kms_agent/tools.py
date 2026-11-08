@@ -11,6 +11,7 @@ from langchain_community.vectorstores import OpenSearchVectorSearch
 from langchain_core.documents import Document
 from langchain_openai import OpenAIEmbeddings
 from langgraph.runtime import get_runtime
+from opensearchpy import OpenSearch
 
 from kms_agent.context import Context
 
@@ -38,7 +39,7 @@ def _kms_configured(context: Context) -> bool:
 
 @lru_cache(maxsize=8)
 def _get_embeddings(model_name: str) -> OpenAIEmbeddings:
-    init_kwargs: dict[str, str] = {"model": model_name}
+    init_kwargs: dict[str, Any] = {"model": model_name}
 
     base_url = os.environ.get("EMBEDDING_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
     if base_url:
@@ -98,6 +99,44 @@ def get_vector_store(context: Context) -> OpenSearchVectorSearch | None:
     )
 
 
+@lru_cache(maxsize=8)
+def _get_opensearch_client(
+    *,
+    opensearch_url: str,
+    username: str,
+    password: str,
+    use_ssl: bool,
+    verify_certs: bool,
+    ssl_assert_hostname: bool,
+) -> OpenSearch:
+    return OpenSearch(
+        hosts=[opensearch_url],
+        http_auth=(username, password),
+        use_ssl=use_ssl,
+        verify_certs=verify_certs,
+        ssl_assert_hostname=ssl_assert_hostname,
+    )
+
+
+def get_opensearch_client(context: Context) -> OpenSearch | None:
+    """Return a client for native OpenSearch queries when KMS is configured."""
+    if not _kms_configured(context):
+        return None
+
+    opensearch_url = _build_opensearch_url(context)
+    if opensearch_url is None:
+        return None
+
+    return _get_opensearch_client(
+        opensearch_url=opensearch_url,
+        username=context.kms_opensearch_user or "",
+        password=context.kms_opensearch_password or "",
+        use_ssl=context.kms_opensearch_use_ssl,
+        verify_certs=context.kms_opensearch_verify_certs,
+        ssl_assert_hostname=context.kms_opensearch_ssl_assert_hostname,
+    )
+
+
 def _kms_unavailable_message() -> str:
     return "KMS vector store is not configured. Set the KMS_OPENSEARCH_* env vars first."
 
@@ -133,4 +172,74 @@ def kms_vector_search(query: str, k: int | None = None) -> dict[str, Any]:
     }
 
 
-TOOLS: list[Callable[..., Any]] = [kms_vector_search]
+def kms_text_search(query: str, k: int | None = None) -> dict[str, Any]:
+    """Search the configured KMS index using native OpenSearch BM25 text matching."""
+    runtime = get_runtime(Context)
+    return search_text(runtime.context, query, k)
+
+
+def search_text(context: Context, query: str, k: int | None = None) -> dict[str, Any]:
+    """Search with an explicit connection context, shared by specialist agents."""
+    if not _kms_configured(context):
+        return {
+            "available": False,
+            "message": "KMS OpenSearch is not configured. Set the KMS_OPENSEARCH_* env vars first.",
+            "matches": [],
+        }
+
+    normalized_query = query.strip()
+    if not normalized_query:
+        return {
+            "available": True,
+            "index": context.kms_opensearch_index,
+            "query": query,
+            "matches": [],
+        }
+
+    client = get_opensearch_client(context)
+    if client is None:
+        return {
+            "available": False,
+            "message": "KMS OpenSearch is not configured. Set the KMS_OPENSEARCH_* env vars first.",
+            "matches": [],
+        }
+
+    requested_k = context.kms_search_k if k is None else k
+    result_count = min(max(requested_k, 1), 100)
+    simple_query: dict[str, Any] = {
+        "query": normalized_query,
+        "default_operator": "and",
+    }
+    fields = [field.strip() for field in context.kms_text_search_fields.split(",") if field.strip()]
+    if fields:
+        simple_query["fields"] = fields
+
+    response = client.search(
+        index=context.kms_opensearch_index,
+        body={
+            "size": result_count,
+            "query": {"simple_query_string": simple_query},
+            "highlight": {"fields": {"*": {}}},
+        },
+    )
+    matches = []
+    for hit in response.get("hits", {}).get("hits", []):
+        match = {
+            "id": hit.get("_id"),
+            "index": hit.get("_index"),
+            "score": hit.get("_score"),
+            "source": hit.get("_source", {}),
+        }
+        if "highlight" in hit:
+            match["highlight"] = hit["highlight"]
+        matches.append(match)
+
+    return {
+        "available": True,
+        "index": context.kms_opensearch_index,
+        "query": query,
+        "matches": matches,
+    }
+
+
+TOOLS: list[Callable[..., Any]] = [kms_vector_search, kms_text_search]

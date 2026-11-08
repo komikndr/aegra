@@ -16,6 +16,7 @@ from aegra_api.core.auth_ctx import with_auth_ctx
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.models.run_job import RunJob
+from aegra_api.security.trusted_context import sanitize_execution_config, sanitize_execution_context
 from aegra_api.services.broker import broker_manager
 from aegra_api.services.event_streaming.native_stream import stream_native_v3_events
 from aegra_api.services.graph_streaming import stream_graph_events
@@ -214,7 +215,7 @@ async def _stream_native_v2(
 
 
 async def _build_execution_context(job: RunJob) -> dict[str, Any]:
-    execution_context = dict(job.execution.context or {})
+    execution_context = sanitize_execution_context(job.execution.context)
     try:
         maker = _get_session_maker()
         async with maker() as session:
@@ -246,7 +247,7 @@ def _build_run_config(job: RunJob) -> dict[str, Any]:
         job.identity.run_id,
         job.identity.thread_id,
         job.user,
-        additional_config=job.execution.config,
+        additional_config=sanitize_execution_config(job.execution.config),
         checkpoint=job.execution.checkpoint,
     )
     if job.behavior.interrupt_before is not None:

@@ -229,6 +229,17 @@ class UserMemorySnapshot(Base):
     __table_args__ = (Index("idx_user_memory_snapshots_updated_at", "updated_at"),)
 
 
+class AnalyticsConnection(Base):
+    __tablename__ = "analytics_connections"
+
+    connection_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    user_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    profile_id: Mapped[str] = mapped_column(Text, nullable=False)
+    dag_ids: Mapped[list[str]] = mapped_column(JsonbSafe, nullable=False)
+    enabled: Mapped[bool] = mapped_column(nullable=False, default=False)
+
+
 class PipelineWorkflow(Base):
     __tablename__ = "pipeline_workflows"
 
