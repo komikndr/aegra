@@ -1,5 +1,6 @@
 """Graph definitions for the analytic agent."""
 
+import asyncio
 import re
 from datetime import datetime
 from typing import Any, Literal, cast
@@ -83,7 +84,10 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
         runtime.context.user_memory,
     )
-    model_messages = build_token_limited_messages(
+    # Tokenizer initialization can perform synchronous disk/network I/O on a
+    # cold cache. Keep worker heartbeats and SSE responsive during that work.
+    model_messages = await asyncio.to_thread(
+        build_token_limited_messages,
         model,
         system_messages,
         state.messages,

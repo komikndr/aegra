@@ -1,5 +1,7 @@
 """Capability selection and execution regression tests."""
 
+import asyncio
+import threading
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -108,6 +110,39 @@ async def test_no_sql_does_not_force_discovery(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(graph, "bind_tools_with_parallel", binding)
     await graph.call_model(State(messages=[HumanMessage(content="List tables")]), Runtime(context=ChatContext()))
     binding.assert_not_called()
+    model.ainvoke.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cold_tokenizer_does_not_block_worker_heartbeat(monkeypatch: pytest.MonkeyPatch) -> None:
+    started = threading.Event()
+    release = threading.Event()
+    model = MagicMock()
+    model.ainvoke = AsyncMock(return_value=AIMessage(content="Ready."))
+
+    def prepare_messages(*args: Any, **kwargs: Any) -> list[Any]:
+        started.set()
+        if not release.wait(timeout=2):
+            raise TimeoutError("Event loop could not release tokenizer initialization")
+        return [HumanMessage(content="check db")]
+
+    monkeypatch.setattr(graph, "load_chat_model", lambda *args, **kwargs: model)
+    monkeypatch.setattr(graph, "apply_reasoning_effort", lambda model, *args, **kwargs: model)
+    monkeypatch.setattr(graph, "get_environment_airflow_tools", lambda: [])
+    monkeypatch.setattr(graph, "build_token_limited_messages", prepare_messages)
+    task = asyncio.create_task(
+        graph.call_model(State(messages=[HumanMessage(content="check db")]), Runtime(context=ChatContext()))
+    )
+    try:
+        async with asyncio.timeout(1):
+            while not started.is_set():
+                await asyncio.sleep(0.001)
+        # This represents heartbeat/SSE work on the same loop while preparation
+        # is blocked. It cannot run if preparation executes on the event loop.
+        assert not task.done()
+    finally:
+        release.set()
+        await task
     model.ainvoke.assert_awaited_once()
 
 

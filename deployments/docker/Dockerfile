@@ -36,6 +36,11 @@ RUN uv export --frozen --no-emit-project --format=requirements-txt > requirement
     uv pip install --system --compile-bytecode -r requirements.txt && \
     rm requirements.txt
 
+# Download common OpenAI tokenizer data at build time, not on the first chat
+# request. Use a fixed location that survives into the non-root runtime image.
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
+RUN python -c "import tiktoken; [tiktoken.get_encoding(name) for name in ('cl100k_base', 'o200k_base')]"
+
 # Copy the actual project source code and forced includes (alembic).
 COPY libs/aegra-api/src/ ./src/
 COPY libs/aegra-api/alembic.ini ./alembic.ini
@@ -59,6 +64,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Copy installed Python packages from the builder stage.
 COPY --from=builder /usr/local/lib/python${PY_VERSION}/site-packages/ /usr/local/lib/python${PY_VERSION}/site-packages/
 COPY --from=builder /usr/local/bin/ /usr/local/bin/
+COPY --from=builder /opt/tiktoken-cache/ /opt/tiktoken-cache/
+ENV TIKTOKEN_CACHE_DIR=/opt/tiktoken-cache
 
 # Copy runtime assets required by the app and alembic
 COPY libs/aegra-api/alembic.ini ./alembic.ini
