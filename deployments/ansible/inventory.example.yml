@@ -9,6 +9,6 @@ all:
           # Change these paths if the VM uses a different layout.
           onyx_backend_dir: /home/kms/aegra
           onyx_frontend_dir: /home/kms/executive-ai-canvas
-          onyx_secret_dir: /home/kms/gpu_platform/onyx_ai_secret
+          onyx_secret_dir: /home/kms/onyx_ai_secret
           onyx_release_root: /home/kms/onyx-releases
           onyx_backup_root: /home/kms/onyx-backups

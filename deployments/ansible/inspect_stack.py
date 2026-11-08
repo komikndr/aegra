@@ -41,6 +41,19 @@ def sqlite_path(url: str) -> str | None:
     return posixpath.normpath(path if path.startswith("/") else f"/app/{path}")
 
 
+def analytic_database(environment: dict[str, Any]) -> str:
+    url = str(environment.get("ANALYTIC_DB_URL", "")).strip()
+    if url:
+        return url
+    dialect = str(environment.get("ANALYTIC_DB_DIALECT", "sqlite")).strip().lower()
+    name = str(environment.get("ANALYTIC_DB_NAME", "")).strip()
+    return f"sqlite:///{name}" if dialect == "sqlite" and name else ""
+
+
+def database_engine(url: str) -> str | None:
+    return url.split(":", 1)[0].split("+", 1)[0] if url else None
+
+
 def runtime_override(service: str, mounts: list[dict[str, Any]]) -> dict[str, Any]:
     volumes: dict[str, Any] = {}
     application_mounts: list[dict[str, Any]] = []
@@ -91,11 +104,19 @@ def inspect_stack(directory: Path, env_file: Path, service: str) -> dict[str, An
         required.add("redis")
     if not required.issubset(set(running)):
         blockers.append("Required infrastructure is not running in the existing Compose project.")
-    database = str(configured_environment.get("ANALYTIC_DB_URL", ""))
-    if not database and configured_environment.get("ANALYTIC_DB_DIALECT", "sqlite") == "sqlite":
-        name = configured_environment.get("ANALYTIC_DB_NAME", "")
-        database = f"sqlite:///{name}" if name else ""
-    path = sqlite_path(database)
+    configured_database = analytic_database(configured_environment)
+    running_environment = dict(
+        value.split("=", 1) for value in actual["Config"].get("Env", []) if "=" in value
+    ) if actual else {}
+    running_database = analytic_database(running_environment)
+    if service == "aegra" and running_environment:
+        database_fields = (
+            "ANALYTIC_DB_URL", "ANALYTIC_DB_DIALECT", "ANALYTIC_DB_HOST", "ANALYTIC_DB_PORT",
+            "ANALYTIC_DB_NAME", "ANALYTIC_DB_USER", "ANALYTIC_DB_PASSWORD",
+        )
+        if any(str(configured_environment.get(key) or "") != running_environment.get(key, "") for key in database_fields):
+            blockers.append("Selected environment file differs from the running analytic database configuration. Verify onyx_secret_dir before deployment.")
+    path = sqlite_path(running_database if running_environment else configured_database)
     mounts = actual.get("Mounts", []) if actual else []
     for mount in mounts:
         target = mount["Destination"].rstrip("/")
@@ -118,6 +139,11 @@ def inspect_stack(directory: Path, env_file: Path, service: str) -> dict[str, An
     return {
         "project": project,
         "service": service,
+        "selected_env_file": str(env_file),
+        "analytic_database_engines": {
+            "configured": database_engine(configured_database),
+            "running": database_engine(running_database),
+        } if service == "aegra" else None,
         "running_services": running,
         "application_image_id": actual.get("Image") if actual else None,
         "runtime_override": runtime_override(service, mounts),

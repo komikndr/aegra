@@ -64,6 +64,24 @@ def test_inspection_preserves_stack_env_and_redacts_secrets(inspection: ModuleTy
     report = inspection.inspect_stack(Path("/home/kms/aegra"), Path("/private/env.staging.backend"), "aegra")
     assert any("DATABASE_URL" in reason for reason in report["blockers"])
 
+    # An unrelated SQLite env file must not be mistaken for the live PostgreSQL database.
+    containers[0]["Config"]["Env"] = [
+        "ANALYTIC_DB_URL=postgresql+psycopg://user:secret-running-password@external-db/research",
+        "ANALYTIC_DB_DIALECT=postgresql",
+    ]
+    report = inspection.inspect_stack(Path("/home/kms/aegra"), Path("/private/env.staging.backend"), "aegra")
+    assert report["analytic_database_engines"] == {"configured": "sqlite", "running": "postgresql"}
+    assert any("Selected environment file differs" in reason for reason in report["blockers"])
+    assert not any("SQLite storage" in reason for reason in report["blockers"])
+    assert "secret-running-password" not in json.dumps(report)
+
+    environment.pop("DATABASE_URL")
+    environment["ANALYTIC_DB_URL"] = "postgresql+psycopg://user:secret-running-password@external-db/research"
+    environment["ANALYTIC_DB_DIALECT"] = "postgresql"
+    report = inspection.inspect_stack(Path("/home/kms/aegra"), Path("/private/env.staging.backend"), "aegra")
+    assert report["analytic_database_engines"] == {"configured": "postgresql", "running": "postgresql"}
+    assert report["blockers"] == []
+
 
 def test_existing_named_data_mount_retains_external_volume_identity(inspection: ModuleType) -> None:
     override = inspection.runtime_override("aegra", [{
