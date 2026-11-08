@@ -1,5 +1,7 @@
 """Read-only staging inspection. Never print environment values or subprocess errors."""
 
+from __future__ import annotations
+
 import argparse
 import json
 import os
@@ -10,14 +12,19 @@ from typing import Any
 from urllib.parse import urlsplit
 
 
+class InspectionError(ValueError):
+    """A deliberately sanitized error safe for the operator report."""
+
+
 def command_json(arguments: list[str], environment: dict[str, str] | None = None) -> Any:
     result = subprocess.run(arguments, capture_output=True, text=True, check=False, timeout=30, env=environment)
     if result.returncode:
-        raise ValueError("A Docker inspection command failed; examine it privately on the VM.")
+        operation = "Compose configuration" if "config" in arguments else "Docker container inspection"
+        raise InspectionError(f"{operation} failed. Check Docker access and staging configuration privately on the VM.")
     try:
         return json.loads(result.stdout)
     except ValueError as error:
-        raise ValueError("Docker returned an unsupported inspection format.") from error
+        raise InspectionError("Docker returned an unsupported inspection format; Docker Compose V2 is required.") from error
 
 
 def public_origin(value: str) -> str | None:
@@ -55,6 +62,8 @@ def runtime_override(service: str, mounts: list[dict[str, Any]]) -> dict[str, An
 
 
 def inspect_stack(directory: Path, env_file: Path, service: str) -> dict[str, Any]:
+    if not (directory / "docker-compose-staging.yaml").is_file():
+        raise InspectionError(f"The {service} repository path does not contain docker-compose-staging.yaml. Check inventory paths.")
     compose = ["docker", "compose", "--env-file", str(env_file), "-f", str(directory / "docker-compose-staging.yaml")]
     if (directory / ".onyx-runtime.json").is_file():
         compose.extend(["-f", str(directory / ".onyx-runtime.json")])
@@ -136,12 +145,15 @@ def main() -> None:
     try:
         for name in ("env.staging.backend", "env.staging.frontend", "keycloak-realm-aegra.staging.json"):
             if not (args.secrets / name).is_file():
-                raise ValueError(f"Required VM file is missing: {name}")
+                raise InspectionError(f"Required VM file is missing: {name}. Check onyx_secret_dir in the inventory.")
         result = {
             "backend": inspect_stack(args.backend, args.secrets / "env.staging.backend", "aegra"),
             "frontend": inspect_stack(args.frontend, args.secrets / "env.staging.frontend", "app"),
         }
         print(json.dumps(result))
+    except InspectionError as error:
+        print(json.dumps({"error": str(error)}))
+        raise SystemExit(1) from None
     except (ValueError, OSError, subprocess.SubprocessError):
         print(json.dumps({"error": "Preflight failed. Check configured paths, Docker access, and Compose privately on the VM."}))
         raise SystemExit(1) from None

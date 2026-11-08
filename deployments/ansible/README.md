@@ -12,7 +12,7 @@ The default VM layout is:
 ```text
 /home/kms/aegra/
 /home/kms/executive-ai-canvas/
-/home/kms/onyx_ai_secret/
+/home/kms/gpu_platform/onyx_ai_secret/
   env.staging.backend
   env.staging.frontend
   keycloak-realm-aegra.staging.json
@@ -61,7 +61,7 @@ Preflight does not start, stop, or recreate containers.
 Resolve the reported blockers before deployment.
 Check that public service origins use `10.10.5.11`, rather than old `10.10.5.190` defaults.
 The playbooks do not edit authentication URLs or Keycloak clients.
-If the secret directory is under `gpu_platform`, change `onyx_secret_dir` in the inventory.
+The example inventory uses the confirmed secret directory under `/home/kms/gpu_platform/`.
 
 An application SQLite database must use persistent storage before Aegra recreation.
 The playbook refuses an unmounted analytic SQLite database.
@@ -115,7 +115,7 @@ For manual Compose operations in those directories, include the generated mount 
 
 ```sh
 COMPOSE_PROJECT_NAME=<existing-project-name> \
-STAGING_ENV_FILE=/home/kms/onyx_ai_secret/env.staging.backend \
+STAGING_ENV_FILE=/home/kms/gpu_platform/onyx_ai_secret/env.staging.backend \
 sh ./stack.sh staging -f .onyx-runtime.json ps
 ```
 

@@ -13,9 +13,26 @@
         executable: "{{ ansible_python_interpreter | default('/usr/bin/python3') }}"
       register: onyx_inspection
       changed_when: false
+      failed_when: false
       check_mode: false
       no_log: true
 
+    - name: Decode the sanitized inspection result
+      block:
+        - name: Read inspection JSON without exposing transport output
+          ansible.builtin.set_fact:
+            onyx_preflight_report: "{{ onyx_inspection.stdout | from_json }}"
+          no_log: true
+      rescue:
+        - name: Report an inspection transport or interpreter failure
+          ansible.builtin.fail:
+            msg: Preflight could not return JSON. Check the configured remote Python interpreter and SSH access.
+
+    - name: Report a sanitized inspection failure
+      ansible.builtin.fail:
+        msg: "{{ onyx_preflight_report.error | default('Preflight failed before inspection completed.') }}"
+      when: onyx_inspection.rc | default(1) != 0 or onyx_preflight_report.error is defined
+
     - name: Show the sanitized deployment report
       ansible.builtin.debug:
-        msg: "{{ onyx_inspection.stdout | from_json }}"
+        msg: "{{ onyx_preflight_report }}"

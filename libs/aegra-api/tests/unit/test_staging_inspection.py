@@ -20,6 +20,7 @@ def inspection() -> ModuleType:
 
 
 def test_inspection_preserves_stack_env_and_redacts_secrets(inspection: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "is_file", lambda path: path.name == "docker-compose-staging.yaml")
     environment = {
         "POSTGRES_PASSWORD": "secret-database-password",
         "REDIS_BROKER_ENABLED": "true",
@@ -82,3 +83,26 @@ def test_staging_path_and_origin_validation(inspection: ModuleType) -> None:
     assert inspection.sqlite_path("postgresql://user:password@db/main") is None
     assert inspection.public_origin("https://user:secret@example.com/path?token=secret") == "https://example.com:443"
     assert inspection.public_origin("not-a-url") is None
+
+
+def test_missing_secret_path_returns_actionable_sanitized_json(
+    inspection: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("sys.argv", [
+        "inspect_stack.py", "--backend", str(tmp_path), "--frontend", str(tmp_path), "--secrets", str(tmp_path),
+    ])
+    with pytest.raises(SystemExit) as error:
+        inspection.main()
+    assert error.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert "env.staging.backend" in report["error"]
+    assert "onyx_secret_dir" in report["error"]
+
+
+def test_failed_compose_does_not_echo_subprocess_secrets(inspection: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(inspection.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(
+        returncode=1, stdout="secret-value", stderr="secret-password",
+    ))
+    with pytest.raises(inspection.InspectionError, match="Compose configuration") as error:
+        inspection.command_json(["docker", "compose", "config"])
+    assert "secret" not in str(error.value)
