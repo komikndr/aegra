@@ -2,9 +2,7 @@
 
 import asyncio
 import re
-from datetime import datetime
 from typing import Any, Literal, cast
-from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.config import get_config
@@ -12,10 +10,12 @@ from langgraph.graph import StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.prebuilt import ToolNode
 from langgraph.runtime import Runtime
+from react_agent.clock import get_current_time
 from react_agent.model_config import resolve_agent_model
 from react_agent.state import InputState, State
 from react_agent.utils import (
     apply_reasoning_effort,
+    attach_context_breakdown,
     bind_tools_with_parallel,
     build_reasoning_storage_update,
     build_system_prompt_messages,
@@ -41,6 +41,15 @@ _SCHEMA_DISCOVERY_REQUEST = re.compile(
     re.IGNORECASE,
 )
 
+_CLOCK_INSTRUCTION = (
+    "\n\nCall get_current_time only when the task depends on the current date or time, "
+    "including relative dates such as today or yesterday. Do not reuse earlier clock results."
+)
+
+
+def _invocation_tools(context: BaseContext) -> list[Any]:
+    return [*get_tools(context), *get_environment_airflow_tools(), get_current_time]
+
 
 def requires_initial_table_listing(state: State) -> bool:
     """Require table discovery before answering a new schema-discovery request."""
@@ -65,13 +74,11 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         min_recent_messages=runtime.context.num_limit_min_recent_messages,
     )
     base_model = load_chat_model(model_config.model, base_url=model_config.base_url, api_key=model_config.api_key)
-    tools = [*get_tools(runtime.context), *get_environment_airflow_tools()]
+    tools = _invocation_tools(runtime.context)
     if analytic_list_tables in tools and requires_initial_table_listing(state):
         model = bind_tools_with_parallel(base_model, [analytic_list_tables], tool_choice="required")
-    elif tools:
-        model = bind_tools_with_parallel(base_model, tools)
     else:
-        model = base_model
+        model = bind_tools_with_parallel(base_model, tools)
     model = apply_reasoning_effort(
         model,
         model_config.model,
@@ -80,12 +87,13 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         api_key=model_config.api_key,
     )
     system_messages = build_system_prompt_messages(
-        runtime.context.system_prompt + capability_prompt(tools),
-        datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
+        runtime.context.system_prompt + capability_prompt(tools) + _CLOCK_INSTRUCTION,
+        None,
         runtime.context.user_memory,
     )
     # Tokenizer initialization can perform synchronous disk/network I/O on a
     # cold cache. Keep worker heartbeats and SSE responsive during that work.
+    context_report: dict[str, Any] = {}
     model_messages = await asyncio.to_thread(
         build_token_limited_messages,
         model,
@@ -103,6 +111,7 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         num_limit_min_recent_messages=model_config.min_recent_messages
         if model_config.min_recent_messages is not None
         else runtime.context.num_limit_min_recent_messages,
+        context_report=context_report,
     )
     try:
         response = cast("AIMessage", await model.ainvoke(model_messages))
@@ -111,6 +120,8 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
             response = AIMessage(content="Sorry, the model do not have image capability.")
         else:
             raise
+    else:
+        attach_context_breakdown(response, context_report)
 
     if state.is_last_step and response.tool_calls:
         final_response = AIMessage(
@@ -133,7 +144,7 @@ def route_model_output(state: State) -> Literal["__end__", "tools"]:
 
 async def call_tools(state: State, runtime: Runtime[BaseContext]) -> dict[str, Any]:
     """Execute only tools enabled for this invocation, including replayed tool calls."""
-    tools = [*get_tools(runtime.context), *get_environment_airflow_tools()]
+    tools = _invocation_tools(runtime.context)
     return await ToolNode(tools).ainvoke(state, get_config())
 
 

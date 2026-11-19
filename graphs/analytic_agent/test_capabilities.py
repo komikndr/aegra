@@ -106,11 +106,18 @@ async def test_no_sql_does_not_force_discovery(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setattr(graph, "load_chat_model", lambda *args, **kwargs: model)
     monkeypatch.setattr(graph, "apply_reasoning_effort", lambda model, *args, **kwargs: model)
     monkeypatch.setattr(graph, "build_token_limited_messages", lambda *args, **kwargs: [])
-    binding = MagicMock()
+    binding = MagicMock(return_value=model)
     monkeypatch.setattr(graph, "bind_tools_with_parallel", binding)
     await graph.call_model(State(messages=[HumanMessage(content="List tables")]), Runtime(context=ChatContext()))
-    binding.assert_not_called()
+    binding.assert_called_once_with(model, [graph.get_current_time])
     model.ainvoke.assert_awaited_once()
+
+
+def test_analytic_clock_is_on_demand() -> None:
+    prompt = graph.build_system_prompt_messages("Stable prompt\n\nSystem time: {system_time}", None, "")
+    assert prompt[0].content == "Stable prompt"
+    result = graph.get_current_time.invoke({})
+    assert result.endswith("+07:00 (Asia/Jakarta)")
 
 
 @pytest.mark.asyncio
@@ -130,6 +137,7 @@ async def test_cold_tokenizer_does_not_block_worker_heartbeat(monkeypatch: pytes
     monkeypatch.setattr(graph, "apply_reasoning_effort", lambda model, *args, **kwargs: model)
     monkeypatch.setattr(graph, "get_environment_airflow_tools", lambda: [])
     monkeypatch.setattr(graph, "build_token_limited_messages", prepare_messages)
+    model.bind_tools.return_value = model
     task = asyncio.create_task(
         graph.call_model(State(messages=[HumanMessage(content="check db")]), Runtime(context=ChatContext()))
     )

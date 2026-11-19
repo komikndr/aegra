@@ -510,21 +510,93 @@ def _estimate_messages_tokens(messages: list[Any]) -> int:
     return sum(_estimate_message_tokens(message) for message in messages) + 4
 
 
-def _count_messages_tokens(model: Any, messages: list[Any]) -> int:
+def _count_messages_tokens_with_source(model: Any, messages: list[Any]) -> tuple[int, bool]:
+    """Count message tokens; the bool reports whether a real tokenizer was used."""
     get_num_tokens_from_messages = getattr(model, "get_num_tokens_from_messages", None)
     if callable(get_num_tokens_from_messages):
         try:
             token_count = get_num_tokens_from_messages(messages)
             if isinstance(token_count, int):
-                return int(token_count)
+                return int(token_count), True
             if isinstance(token_count, float):
-                return int(token_count)
+                return int(token_count), True
             if isinstance(token_count, str):
-                return int(float(token_count))
-            return _estimate_messages_tokens(messages)
+                return int(float(token_count)), True
+            return _estimate_messages_tokens(messages), False
         except Exception:
-            return _estimate_messages_tokens(messages)
-    return _estimate_messages_tokens(messages)
+            return _estimate_messages_tokens(messages), False
+    return _estimate_messages_tokens(messages), False
+
+
+def _count_messages_tokens(model: Any, messages: list[Any]) -> int:
+    return _count_messages_tokens_with_source(model, messages)[0]
+
+
+def _estimate_tool_definition_tokens(model: Any) -> int | None:
+    """Estimate the prompt cost of the bound tool definitions.
+
+    Providers bill tool schemas inside the prompt, but never report them per
+    segment, so this is a serialized-JSON estimate. Returns None when the bound
+    runnable exposes no introspectable tools, which the UI shows as unknown
+    instead of zero.
+    """
+    tools: Any = None
+    node: Any = model
+    while node is not None:
+        kwargs = getattr(node, "kwargs", None)
+        if isinstance(kwargs, dict) and "tools" in kwargs:
+            tools = kwargs["tools"]
+            break
+        node = getattr(node, "bound", None)
+    if tools is None:
+        return None
+    if not tools:
+        return 0
+
+    def _fallback(value: Any) -> Any:
+        dump = getattr(value, "model_dump", None)
+        if callable(dump):
+            try:
+                return dump()
+            except Exception:
+                pass
+        return str(value)
+
+    try:
+        return _estimate_text_tokens(json.dumps(tools, default=_fallback))
+    except Exception:
+        return None
+
+
+def _fill_context_breakdown_report(
+    report: dict[str, Any],
+    model: Any,
+    system_messages: list[Any],
+    original_messages: list[Any],
+    retained_messages: list[Any],
+) -> None:
+    """Record how the model input was composed and what pruning removed.
+
+    ``pruned_messages`` / ``pruned_tokens`` describe messages dropped from this
+    model call's input by the token budget. They stay outside the used-token
+    counts because the model never received them.
+    """
+    pruned_count = max(0, len(original_messages) - len(retained_messages))
+    pruned_messages = original_messages[:pruned_count] if pruned_count else []
+    system_tokens, system_trusted = _count_messages_tokens_with_source(model, list(system_messages))
+    retained_tokens, retained_trusted = _count_messages_tokens_with_source(model, list(retained_messages))
+    pruned_tokens, pruned_trusted = _count_messages_tokens_with_source(model, pruned_messages) if pruned_messages else (0, True)
+    report.update(
+        {
+            "schema_version": 1,
+            "estimated": not (system_trusted and retained_trusted and pruned_trusted),
+            "system_prompt_tokens": system_tokens,
+            "messages_tokens": retained_tokens,
+            "tool_definition_tokens": _estimate_tool_definition_tokens(model),
+            "pruned_messages": pruned_count,
+            "pruned_tokens": pruned_tokens,
+        }
+    )
 
 
 def build_token_limited_messages(
@@ -536,10 +608,13 @@ def build_token_limited_messages(
     num_limit_response_reserve: int,
     num_limit_safety_buffer: int,
     num_limit_min_recent_messages: int,
+    context_report: dict[str, Any] | None = None,
 ) -> list[Any]:
     """Build model input messages constrained by a hard token budget.
 
     Prunes oldest messages first while preserving most recent turns.
+    When ``context_report`` is provided it is filled with how the input was
+    composed (system prompt, kept messages, pruned messages, tool schemas).
     """
     hard_limit = max(1024, int(num_limit_token))
     reserve = max(0, int(num_limit_response_reserve))
@@ -550,6 +625,8 @@ def build_token_limited_messages(
     system_messages = _normalize_system_messages(system_message)
 
     if not messages:
+        if context_report is not None:
+            _fill_context_breakdown_report(context_report, model, system_messages, [], [])
         return system_messages
 
     trimmed_messages = list(messages)
@@ -563,10 +640,27 @@ def build_token_limited_messages(
         _drop_oldest_message_group(trimmed_messages)
         payload = [*system_messages, *trimmed_messages]
 
+    if context_report is not None:
+        _fill_context_breakdown_report(context_report, model, system_messages, list(messages), trimmed_messages)
+
     return payload
 
 
-def build_system_prompt_messages(system_prompt: str, system_time: str, user_memory: str) -> list[SystemMessage]:
+def attach_context_breakdown(response: AIMessage, report: dict[str, Any]) -> None:
+    """Attach a model-input composition report to a real model response.
+
+    The report describes the exact prompt that produced this message; the UI
+    reads it back from the persisted thread history to render the context
+    breakdown. Never call this for synthesized fallback messages.
+    """
+    if not report:
+        return
+    metadata = getattr(response, "response_metadata", None)
+    if isinstance(metadata, dict):
+        metadata["context_breakdown"] = dict(report)
+
+
+def build_system_prompt_messages(system_prompt: str, system_time: str | None, user_memory: str) -> list[SystemMessage]:
     stable_prompt = system_prompt.replace("\n\nSystem time: {system_time}", "").strip()
     content_parts = [stable_prompt]
     memory = user_memory.strip()
@@ -577,7 +671,8 @@ def build_system_prompt_messages(system_prompt: str, system_time: str, user_memo
             "Do not mention this memory block unless the user asks.\n\n"
             f"{memory}"
         )
-    content_parts.append(f"System time: {system_time}")
+    if system_time is not None:
+        content_parts.append(f"System time: {system_time}")
     return [SystemMessage(content="\n\n".join(content_parts))]
 
 

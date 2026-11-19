@@ -68,6 +68,7 @@ from opensearchpy import OpenSearch as OpenSearchClient
 from opensearchpy import TransportError
 from PIL import Image, UnidentifiedImageError
 from pydantic import BaseModel, Field
+from react_agent.context import Context as AgentContext
 from react_agent.model_config import (
     list_pipeline_models as list_configured_pipeline_models,
 )
@@ -1071,6 +1072,24 @@ def _get_configured_model() -> str:
     return os.environ.get("MODEL", "openai/gpt-4o-mini").strip() or "openai/gpt-4o-mini"
 
 
+def _get_effective_context_limits() -> dict[str, int]:
+    """Resolve token-window limits exactly like the agent graphs do at runtime.
+
+    Graphs pass their live Context values to resolve_agent_model, which prefers
+    agent configuration from JSON over them. Instantiating the shared base
+    Context reuses its post-initialization environment overrides (for example
+    NUM_LIMIT_TOKEN) instead of duplicating those defaults here, so the API and
+    the graphs report and enforce the same effective context window.
+    """
+    context = AgentContext()
+    return {
+        "context_window": context.num_limit_token,
+        "response_reserve": context.num_limit_response_reserve,
+        "safety_buffer": context.num_limit_safety_buffer,
+        "min_recent_messages": context.num_limit_min_recent_messages,
+    }
+
+
 PIPELINE_KEY_PREFIX = "aegra_pipeline_"
 
 
@@ -1507,7 +1526,15 @@ async def protected_endpoint(user: User = Depends(require_auth)):
 @app.get("/custom/model-info")
 async def model_info(agent_id: str | None = Query(default=None, alias="agentId"), user: User = Depends(require_auth)):
     """Return configured and resolved active model info for the UI."""
-    model_config = resolve_agent_model(agent_id, context_model=_get_configured_model())
+    limits = _get_effective_context_limits()
+    model_config = resolve_agent_model(
+        agent_id,
+        context_model=_get_configured_model(),
+        context_window=limits["context_window"],
+        response_reserve=limits["response_reserve"],
+        safety_buffer=limits["safety_buffer"],
+        min_recent_messages=limits["min_recent_messages"],
+    )
     resolved_provider, resolved_model = resolve_model_name(
         model_config.model,
         base_url=model_config.base_url,

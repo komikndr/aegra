@@ -1,7 +1,7 @@
 """Graph definitions for the KMS agent."""
 
 from datetime import datetime
-from typing import Literal, cast
+from typing import Any, Literal, cast
 from zoneinfo import ZoneInfo
 
 from langchain_core.messages import AIMessage
@@ -12,6 +12,7 @@ from react_agent.model_config import resolve_agent_model
 from react_agent.state import InputState, State
 from react_agent.utils import (
     apply_reasoning_effort,
+    attach_context_breakdown,
     bind_tools_with_parallel,
     build_reasoning_storage_update,
     build_system_prompt_messages,
@@ -53,6 +54,7 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
         runtime.context.user_memory,
     )
+    context_report: dict[str, Any] = {}
     model_messages = build_token_limited_messages(
         model,
         system_messages,
@@ -69,6 +71,7 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
         num_limit_min_recent_messages=model_config.min_recent_messages
         if model_config.min_recent_messages is not None
         else runtime.context.num_limit_min_recent_messages,
+        context_report=context_report,
     )
     try:
         response = cast("AIMessage", await model.ainvoke(model_messages))
@@ -77,6 +80,8 @@ async def call_model(state: State, runtime: Runtime[BaseContext]) -> dict[str, l
             response = AIMessage(content="Sorry, the model do not have image capability.")
         else:
             raise
+    else:
+        attach_context_breakdown(response, context_report)
 
     if state.is_last_step and response.tool_calls:
         final_response = AIMessage(

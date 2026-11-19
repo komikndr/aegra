@@ -1,7 +1,7 @@
 """Graph definitions for the QA agent."""
 
 from datetime import datetime
-from typing import cast
+from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 from kms_agent.tools import get_vector_store, serialize_documents
@@ -12,6 +12,7 @@ from react_agent.model_config import resolve_agent_model
 from react_agent.state import InputState, State
 from react_agent.utils import (
     apply_reasoning_effort,
+    attach_context_breakdown,
     build_reasoning_storage_update,
     build_system_prompt_messages,
     build_token_limited_messages,
@@ -91,6 +92,7 @@ async def call_model(state: State, runtime: Runtime[ChatContext]) -> dict[str, l
         datetime.now(ZoneInfo("Asia/Jakarta")).strftime("%A, %d %B %Y %H:%M:%S WIB"),
         runtime.context.user_memory,
     )
+    context_report: dict[str, Any] = {}
     model_messages = build_token_limited_messages(
         model,
         system_messages,
@@ -107,6 +109,7 @@ async def call_model(state: State, runtime: Runtime[ChatContext]) -> dict[str, l
         num_limit_min_recent_messages=model_config.min_recent_messages
         if model_config.min_recent_messages is not None
         else runtime.context.num_limit_min_recent_messages,
+        context_report=context_report,
     )
     try:
         response = cast("AIMessage", await model.ainvoke(model_messages))
@@ -115,6 +118,8 @@ async def call_model(state: State, runtime: Runtime[ChatContext]) -> dict[str, l
             response = AIMessage(content="Sorry, the model do not have image capability.")
         else:
             raise
+    else:
+        attach_context_breakdown(response, context_report)
 
     return {"messages": build_reasoning_storage_update(state.messages, response)}
 
