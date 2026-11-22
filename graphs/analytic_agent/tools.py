@@ -96,6 +96,10 @@ def analytic_list_tables() -> dict[str, Any]:
             "dialect": engine.dialect.name,
             "tables": table_names,
             "views": view_names,
+            "_onyx_trace": {
+                "format": "markdown",
+                "body": f"**Database inventory**\n\n- Tables: {len(table_names)}\n- Views: {len(view_names)}",
+            },
         }
     except SQLAlchemyError as error:
         return {
