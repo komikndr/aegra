@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable
 from functools import lru_cache
 from typing import Any
@@ -17,7 +18,18 @@ from aegra_api.security.sql_readonly import UnsafeSqlError, execute_read_only_sq
 from analytic_agent.context import Context
 
 
-def _build_database_url(context: Context) -> str | None:
+def _numbered_database_urls() -> dict[str, str]:
+    entries = [(key.rsplit("_", 1)[1], value.strip()) for key, value in os.environ.items()
+               if re.fullmatch(r"ANALYTIC_DB_URL_[0-9]+", key) and value.strip()]
+    return dict(sorted(entries, key=lambda entry: (int(entry[0]), entry[0])))
+
+
+def _build_database_url(context: Context, connection: str | None = None) -> str | None:
+    numbered = _numbered_database_urls()
+    if connection is not None:
+        return numbered.get(connection)
+    if numbered:
+        return next(iter(numbered.values()))
     database_url = os.environ.get("ANALYTIC_DB_URL", "").strip()
     if database_url:
         return database_url
@@ -53,15 +65,17 @@ def _get_engine(database_url: str) -> Engine:
     return create_engine(database_url, future=True)
 
 
-def _get_engine_from_runtime() -> Engine | None:
+def _get_engine_from_runtime(connection: str | None = None) -> Engine | None:
     runtime = get_runtime(Context)
-    database_url = _build_database_url(runtime.context)
+    database_url = _build_database_url(runtime.context, connection)
     if not database_url:
         return None
     return _get_engine(database_url)
 
 
-def _database_unavailable_message() -> str:
+def _database_unavailable_message(connection: str | None = None) -> str:
+    if connection is not None:
+        return "Unknown Analytic connection ID. Use analytic_list_tables to see configured IDs."
     return "Analytic database is not configured. Set ANALYTIC_DB_URL or the ANALYTIC_DB_* connection env vars first."
 
 
@@ -77,14 +91,18 @@ def _is_read_only_query(query: str, dialect: str = "sqlite") -> bool:
     return True
 
 
-def analytic_list_tables() -> dict[str, Any]:
-    """List available tables in the configured analytic database."""
-    engine = _get_engine_from_runtime()
+def analytic_list_tables(connection: str | None = None) -> dict[str, Any]:
+    """List tables and available connection IDs. Omit connection for the default, or pass a listed ID such as '01'."""
+    connections = list(_numbered_database_urls())
+    selected = connection if connection is not None else (connections[0] if connections else None)
+    routing = {"connection": selected, "connections": connections} if connections else {}
+    engine = _get_engine_from_runtime(connection)
     if engine is None:
         return {
             "available": False,
-            "message": _database_unavailable_message(),
+            "message": _database_unavailable_message(connection),
             "tables": [],
+            **routing,
         }
 
     try:
@@ -96,6 +114,7 @@ def analytic_list_tables() -> dict[str, Any]:
             "dialect": engine.dialect.name,
             "tables": table_names,
             "views": view_names,
+            **routing,
             "_onyx_trace": {
                 "format": "markdown",
                 "body": f"**Database inventory**\n\n- Tables: {len(table_names)}\n- Views: {len(view_names)}",
@@ -106,14 +125,15 @@ def analytic_list_tables() -> dict[str, Any]:
             "available": False,
             "message": _database_error_message(error),
             "tables": [],
+            **routing,
         }
 
 
-def analytic_describe_table(table_name: str) -> dict[str, Any]:
-    """Describe a table in the configured analytic database, including column names and types."""
-    engine = _get_engine_from_runtime()
+def analytic_describe_table(table_name: str, connection: str | None = None) -> dict[str, Any]:
+    """Describe a table's columns. Pass the connection ID from analytic_list_tables when not using the default."""
+    engine = _get_engine_from_runtime(connection)
     if engine is None:
-        return {"available": False, "message": _database_unavailable_message()}
+        return {"available": False, "message": _database_unavailable_message(connection)}
 
     try:
         inspector = inspect(engine)
@@ -147,13 +167,13 @@ def analytic_describe_table(table_name: str) -> dict[str, Any]:
         }
 
 
-def analytic_query_sql(query: str) -> dict[str, Any]:
-    """Run a read-only SQL query against the configured analytic database."""
-    engine = _get_engine_from_runtime()
+def analytic_query_sql(query: str, connection: str | None = None) -> dict[str, Any]:
+    """Run read-only SQL. Pass the connection ID from analytic_list_tables when not using the default."""
+    engine = _get_engine_from_runtime(connection)
     if engine is None:
         return {
             "available": False,
-            "message": _database_unavailable_message(),
+            "message": _database_unavailable_message(connection),
             "rows": [],
         }
 
